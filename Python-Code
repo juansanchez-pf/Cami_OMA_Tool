@@ -1,20 +1,19 @@
+import streamlit as st
 import pdfplumber
 import pandas as pd
 import re
 import logging
 import os
-import subprocess
-from pathlib import Path
+import io
+import google.auth
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseDownload
 from datetime import datetime
 
-
---- Configure Logging ---
-
+# --- Configure Logging ---
 logging.getLogger("pdfminer").setLevel(logging.ERROR)
 
-
---- Local Caching Setup ---
-
+# --- Local Caching Setup ---
 CACHE_DIR = "sfdc_cache"
 if not os.path.exists(CACHE_DIR):
     os.makedirs(CACHE_DIR)
@@ -23,30 +22,73 @@ PATH_ACCOUNTS = os.path.join(CACHE_DIR, "rep_accounts.csv")
 PATH_SUBS = os.path.join(CACHE_DIR, "rep_subscriptions.csv")
 PATH_OPPS = os.path.join(CACHE_DIR, "rep_opportunities.csv")
 
-
-Coupa Shared Drives Paths
-
-GDRIVE_PATHS = [
-    "/Users/camila.ferro/Library/CloudStorage/GoogleDrive-camila.ferro@coupa.com/Shared drives/DealDesk 2.0/DD APJ - Ticketing SFDC",
-    "/Users/camila.ferro/Library/CloudStorage/GoogleDrive-camila.ferro@coupa.com/Shared drives/DealDesk 2.0/DD EMEA - Ticketing SFDC",
-    "/Users/camila.ferro/Library/CloudStorage/GoogleDrive-camila.ferro@coupa.com/Shared drives/DealDesk 2.0/DD NA LATAM - Ticketing SFDC"
+# --- 🚨 ADD YOUR GOOGLE DRIVE FOLDER IDs HERE 🚨 ---
+GDRIVE_FOLDER_IDS = [
+    "1NEkV3QHuPMKj20cOhffXyInTHZisS2hW",  # e.g., DD APJ
+    "8pvMv5B3tNqkOV6tMwiDHHl9_GYv9_9",  # e.g., DD EMEA
+    "1liTp0NXeu3RwNa4eaJzzfwNPXnx_J7Vk"   # e.g., DD NA LATAM
 ]
 
+# --- Google Drive API Setup ---
+@st.cache_resource
+def get_gdrive_service():
+    """Authenticates with Google Cloud automatically using the Cloud Run Service Account."""
+    credentials, project = google.auth.default(scopes=['https://www.googleapis.com/auth/drive.readonly'])
+    return build('drive', 'v3', credentials=credentials)
 
---- Helper Functions ---
+def download_from_gdrive(file_id):
+    """Downloads a PDF from Google Drive directly into memory so pdfplumber can read it."""
+    service = get_gdrive_service()
+    request = service.files().get_media(fileId=file_id)
+    file_stream = io.BytesIO()
+    downloader = MediaIoBaseDownload(file_stream, request)
+    done = False
+    while done is False:
+        status, done = downloader.next_chunk()
+    file_stream.seek(0)
+    return file_stream
 
+@st.cache_data(show_spinner=False)
+def search_gdrive(account_name, prior_id=""):
+    """Searches Shared Drives using the Google Drive API."""
+    service = get_gdrive_service()
+    found_files = []
+    
+    core_words = [str(prior_id).strip()] if prior_id else [w for w in re.split(r'[^a-zA-Z0-9]', account_name) if w.strip() and w.lower() not in ['llc', 'inc', 'corp', 'ltd', 'co']][:2]
+    query_parts = [f"name contains '{word}'" for word in core_words]
+    name_query = " and ".join(query_parts)
+    
+    for folder_id in GDRIVE_FOLDER_IDS:
+        if not folder_id or folder_id.startswith("PASTE"): continue
+        
+        query = f"'{folder_id}' in parents and mimeType='application/pdf' and ({name_query})"
+        try:
+            results = service.files().list(
+                q=query, 
+                spaces='drive', 
+                fields="files(id, name)", 
+                supportsAllDrives=True, 
+                includeItemsFromAllDrives=True
+            ).execute()
+            
+            items = results.get('files', [])
+            for item in items:
+                found_files.append({"name": item['name'], "id": item['id']})
+        except Exception as e:
+            logging.error(f"Drive API error: {e}")
+            
+    return found_files
+
+# --- Helper Functions ---
 def normalize_name(name):
-    """Sanitizes product names for 1:1 matching logic."""
     return re.sub(r'[^a-z0-9]', '', str(name).lower())
 
 def normalize_account_name(name):
-    """Sanitizes account names for database matching."""
     if pd.isna(name) or not isinstance(name, str): return ""
     name = re.sub(r'(?i)\b(llc|inc|corp|ltd|co|limited|ps)\b', '', name)
     return re.sub(r'[^a-z0-9]', '', name.lower())
 
 def parse_amount(val_str):
-    """Safely converts currency strings to floats."""
     if not val_str or pd.isna(val_str) or str(val_str).lower() == 'nan': return 0.0
     clean_str = re.sub(r'[,\s]', '', str(val_str))
     if clean_str.count('.') > 1:
@@ -56,7 +98,6 @@ def parse_amount(val_str):
     except ValueError: return 0.0
 
 def get_msa_type(comment_str):
-    """Determines if the MSA is Signed or Online based on the legal commentary."""
     c_lower = comment_str.lower()
     if "agreed to by the parties" in c_lower or "between customer and coupa" in c_lower:
         return "Signed"
@@ -65,35 +106,27 @@ def get_msa_type(comment_str):
     return "Unknown"
 
 def get_product_family(products_list):
-    """Identifies the general product family from the OF line items."""
     text = " ".join([p.get("name", "").lower() for p in products_list])
     if any(x in text for x in ["supply chain", "llamasoft"]): return "Supply Chain"
     if any(x in text for x in ["treasury", "bellin"]): return "Treasury"
     return "BSM"
 
 def get_product_family_from_df(df, col_name):
-    """Identifies product family from SFDC subscription data."""
     if not col_name or col_name not in df.columns: return "BSM"
     text = " ".join(df[col_name].astype(str).str.lower().tolist())
     if any(x in text for x in ["supply chain", "llamasoft"]): return "Supply Chain"
     if any(x in text for x in ["treasury", "bellin"]): return "Treasury"
     return "BSM"
 
-
---- Extraction Functions ---
-
+# --- Extraction Functions ---
 def extract_pdf_account_name(pdf_text):
-    match = re.search(r'Customer Account Name:[\s\n]([A-Za-z0-9\s,.-]+)', pdf_text, re.IGNORECASE)
+    match = re.search(r'Customer Account Name:[\s\n]*([A-Za-z0-9\s,.-]+)', pdf_text, re.IGNORECASE)
     if match: return match.group(1).split('\n')[0].strip()
     return None
 
 @st.cache_data
 def extract_master_data(pdf_file):
-    """Deep extraction logic for Order Forms."""
     data = {"text": "", "fees": {}, "products": [], "yearly_schedule": {}, "msa_comment": "", "dates": {}, "billing_info": {}, "coupa_order_id": ""}
-
-
-
     with pdfplumber.open(pdf_file) as pdf:
         for page in pdf.pages:
             data["text"] += page.extract_text() + "\n"
@@ -103,11 +136,9 @@ def extract_master_data(pdf_file):
                     if row and len(row) >= 3:
                         row_str = str(row)
                         if "USD" in row_str or "Included" in row_str:
-                            # Advanced: Re-join hyphenated products broken by PDF newlines
                             raw_names_text = str(row[0])
                             raw_names_text = re.sub(r'\s-\s\n\s', ' - ', raw_names_text)
                             raw_names = [n.strip() for n in raw_names_text.split('\n') if n.strip() and n.strip() != "Product Name"]
-                            
                             raw_qtys = [q.strip() for q in str(row[2]).split('\n') if q.strip() and q.strip() != "Qty."]
                             
                             raw_totals = []
@@ -119,7 +150,6 @@ def extract_master_data(pdf_file):
                             for i, name in enumerate(raw_names):
                                 qty_str = raw_qtys[i] if i < len(raw_qtys) else (raw_qtys[-1] if raw_qtys else "1")
                                 total_str = raw_totals[i] if i < len(raw_totals) else "0"
-                                
                                 data["products"].append({
                                     "name": name, 
                                     "qty": parse_amount(re.sub(r'[^\d.]', '', qty_str)), 
@@ -130,40 +160,32 @@ def extract_master_data(pdf_file):
     clean_text = re.sub(r'\s+', ' ', data["text"].replace('\n', ' '))
     data["account_name"] = extract_pdf_account_name(data["text"])
 
-    # Auto-extract the Coupa Order ID (Opportunity ID)
-    order_id_match = re.search(r"Coupa Order ID(?:\(s\))?\s:\s([A-Za-z0-9]+)", data["text"], re.IGNORECASE)
+    order_id_match = re.search(r"Coupa Order ID(?:\(s\))?\s*:\s*([A-Za-z0-9]+)", data["text"], re.IGNORECASE)
     if order_id_match:
         data["coupa_order_id"] = order_id_match.group(1).strip()
 
-    start_match = re.search(r"Subscription Start Date:\s(.?)\n", data["text"], re.IGNORECASE)
-    end_match = re.search(r"Subscription End Date:\s(.?)\n", data["text"], re.IGNORECASE)
+    start_match = re.search(r"Subscription Start Date:\s*(.*?)\n", data["text"], re.IGNORECASE)
+    end_match = re.search(r"Subscription End Date:\s*(.*?)\n", data["text"], re.IGNORECASE)
     data["dates"] = {
         "start": start_match.group(1).strip() if start_match else None,
         "end": end_match.group(1).strip() if end_match else None
     }
 
-    # Flexible MSA extraction catching Privacy Terms, subprocessors, or just the MSA URL
-    msa_match = re.search(r"((?:The Coupa subscriptions ordered above|The subscriptions in this Order Form|This Order Form is).?governed by.?(?:Privacy Terms[\"']?\.?|subprocessors\.?|master-subscription-agreement/\.?))", clean_text, re.IGNORECASE)
+    msa_match = re.search(r"((?:The Coupa subscriptions ordered above|The subscriptions in this Order Form|This Order Form is).*?governed by.*?(?:Privacy Terms[\"']?\.?|subprocessors\.?|master-subscription-agreement/\.?))", clean_text, re.IGNORECASE)
     data["msa_comment"] = msa_match.group(1).strip() if msa_match else ""
 
     yearly_fees = re.findall(r"Total Year (\d+)(?:\sProrated)?\sFee:\sUSD\s([\d,.]+)", data["text"], re.IGNORECASE)
     data["yearly_schedule"] = {int(y): parse_amount(v) for y, v in yearly_fees}
-
-
-
-    # Robust Billing/Shipping/Accounts Payable Content Extraction
-    address_block = re.search(r"Billing\s+Info.?(?=Accounts Payable|Signature|$)", data["text"], re.DOTALL | re.IGNORECASE)
+    
+    address_block = re.search(r"Billing\s+Info.*?(?=Accounts Payable|Signature|$)", data["text"], re.DOTALL | re.IGNORECASE)
     has_address_data = False
-
-
-
     if address_block:
         block_text = address_block.group(0)
         has_address_data = bool(re.search(r"Entity Name:\s[a-zA-Z0-9]", block_text, re.IGNORECASE) or 
                                 re.search(r"Address:\s[a-zA-Z0-9]", block_text, re.IGNORECASE))
                                 
-    ap_contact_match = re.search(r"Accounts Payable Contact:\s(.?)(?=Accounts Payable Email|Signature|$|\n)", data["text"], re.IGNORECASE)
-    ap_email_match = re.search(r"Accounts Payable Email:\s(.?)(?=Accounts Payable Contact|Signature|$|\n)", data["text"], re.IGNORECASE)
+    ap_contact_match = re.search(r"Accounts Payable Contact:\s*(.*?)(?=Accounts Payable Email|Signature|$|\n)", data["text"], re.IGNORECASE)
+    ap_email_match = re.search(r"Accounts Payable Email:\s*(.*?)(?=Accounts Payable Contact|Signature|$|\n)", data["text"], re.IGNORECASE)
 
     data["billing_info"] = {
         "ap_contact": ap_contact_match.group(1).strip() if ap_contact_match else None,
@@ -174,16 +196,12 @@ def extract_master_data(pdf_file):
 
     total_match = re.search(r"Total Fee:\sUSD\s([\d,.]+)", data["text"], re.IGNORECASE)
     if total_match: data["fees"]["total"] = parse_amount(total_match.group(1))
-
-
-
     sub_match = re.search(r"Total Subscription Fees?[^\d]([\d,.]+)", data["text"], re.IGNORECASE)
     if sub_match: data["fees"]["total_subscription"] = parse_amount(sub_match.group(1))
 
     return data
 
 def identify_and_save_files(uploaded_files):
-    """Standardizes and stores reports while preserving Leading Zeros and Encoding."""
     for f in uploaded_files:
         try:
             f.seek(0); df = pd.read_csv(f, encoding='utf-8', dtype=str)
@@ -194,49 +212,23 @@ def identify_and_save_files(uploaded_files):
         elif 'sub qty' in cols or 'contract name' in cols: df.to_csv(PATH_SUBS, index=False)
         elif 'account id 18 characters' in cols: df.to_csv(PATH_ACCOUNTS, index=False)
 
-@st.cache_data(show_spinner=False)
-def search_gdrive(account_name, prior_id=""):
-    """Scans local GDrive using Mac Spotlight for lightning-fast lookups."""
-    found_files = set()
-    core_words = [str(prior_id).strip()] if prior_id else [w for w in re.split(r'[^a-zA-Z0-9]', account_name) if w.strip() and w.lower() not in ['llc', 'inc', 'corp', 'ltd', 'co']][:2]
-    try:
-        query = " && ".join([f"kMDItemDisplayName == '{w}'c" for w in core_words] + ["kMDItemContentType == 'com.adobe.pdf'"])
-        for base_path in GDRIVE_PATHS:
-            if os.path.exists(base_path):
-                result = subprocess.run(['mdfind', '-onlyin', base_path, query], capture_output=True, text=True)
-                if result.stdout:
-                    for line in result.stdout.split('\n'):
-                        if line.strip().lower().endswith('.pdf'): found_files.add(line.strip())
-    except: pass
-    return sorted(list(found_files))
-
 def get_best_col(cols, exact_list, partial_list):
-    """Robust column matching prioritizing exact, then shortest partial to avoid prefix matches."""
     if cols is None or len(cols) == 0: return None
     cols_lower = [str(c).strip().lower() for c in cols]
-
-
-
     for ex in exact_list:
         if ex.lower() in cols_lower:
             return cols[cols_lower.index(ex.lower())]
-            
     candidates = []
     for par in partial_list:
         for i, c in enumerate(cols_lower):
             if par.lower() in c:
                 candidates.append(cols[i])
-
-
-
     if candidates:
         candidates.sort(key=len)
         return candidates[0]
-        
     return None
 
 def run_v6_storytelling_engine(pdf_name, pdf_start_date, input_opp_id="", opp_type="Renewal", of_products=[]):
-    """Connects OF data to SFDC historical records and builds the customer journey."""
     try:
         def load_csv_safe(filepath):
             if not os.path.exists(filepath): return pd.DataFrame()
@@ -254,7 +246,6 @@ def run_v6_storytelling_engine(pdf_name, pdf_start_date, input_opp_id="", opp_ty
         df_sub.columns = df_sub.columns.str.strip()
         if not df_acc.empty: df_acc.columns = df_acc.columns.str.strip()
 
-        # --- PRECISE COLUMN MAPPING (Prevents missed linkages) ---
         opp_id_col_opp = get_best_col(df_opp.columns, ['Opportunity ID'], ['opportunity id'])
         renewed_col = get_best_col(df_opp.columns, ['Renewed Contract'], ['renewed contract'])
         acc_id_col_opp = get_best_col(df_opp.columns, ['Account ID 18 Characters', 'Account ID'], ['account id'])
@@ -275,14 +266,12 @@ def run_v6_storytelling_engine(pdf_name, pdf_start_date, input_opp_id="", opp_ty
         acc_type = "Unknown"
         active_contracts = []
         
-        # 1. Grab Account ID & Row matching the current OF's Opp ID
         if input_opp_id:
             if opp_id_col_opp:
                 match = df_opp[df_opp[opp_id_col_opp].fillna('').astype(str).str.strip() == str(input_opp_id).strip()]
                 if not match.empty: 
                     current_opp = match.iloc[0]
             
-            # Unbreakable Fallback: scan all ID columns just in case
             if current_opp is None:
                 for col in df_opp.columns:
                     if 'id' in col.lower() and 'opp' in col.lower():
@@ -294,7 +283,6 @@ def run_v6_storytelling_engine(pdf_name, pdf_start_date, input_opp_id="", opp_ty
         if current_opp is not None and acc_id_col_opp:
             acc_id = str(current_opp.get(acc_id_col_opp, '')).strip()
             
-        # Fallback if Opp ID fails but Account Name is present in the PDF
         if not acc_id and pdf_name and not df_acc.empty:
             acc_name_col = get_best_col(df_acc.columns, ['Account Name'], ['name'])
             acc_id_col_acc = get_best_col(df_acc.columns, ['Account ID 18 Characters', 'Account ID'], ['account id'])
@@ -304,7 +292,6 @@ def run_v6_storytelling_engine(pdf_name, pdf_start_date, input_opp_id="", opp_ty
                     acc_id = str(acc_match.iloc[0][acc_id_col_acc]).strip()
         
         if acc_id:
-            # --- EXTRACT REVENUE CLASSIFICATION & ACCOUNT TYPE ---
             if not df_acc.empty:
                 acc_id_col_acc = get_best_col(df_acc.columns, ['Account ID 18 Characters', 'Account ID'], ['account id'])
                 if acc_id_col_acc:
@@ -320,7 +307,6 @@ def run_v6_storytelling_engine(pdf_name, pdf_start_date, input_opp_id="", opp_ty
                         if acc_type_col:
                             acc_type = str(acc_match.iloc[0][acc_type_col]).strip()
 
-            # --- GATHER ACTIVE CONTRACTS FOR NEW BUSINESS CHECK ---
             if acc_id_col_sub and status_col_sub and contract_col_sub:
                 acc_subs = df_sub[df_sub[acc_id_col_sub].astype(str).str.strip() == acc_id]
                 invalid_statuses = ['expired', 'cancelled', 'canceled', 'false', 'no', 'nan', 'none', '']
@@ -328,13 +314,11 @@ def run_v6_storytelling_engine(pdf_name, pdf_start_date, input_opp_id="", opp_ty
                 active_contracts = acc_subs[active_mask][contract_col_sub].astype(str).str.strip().unique().tolist()
                 active_contracts = [c for c in active_contracts if c.lower() not in ['nan', 'none', '']]
             
-            # --- RENEWAL LOGIC ---
             if opp_type == "Renewal" and current_opp is not None and renewed_col:
                 raw_renewed = str(current_opp.get(renewed_col, '')).replace('.0', '').strip()
                 if raw_renewed and raw_renewed.lower() not in ['nan', 'none', '']: 
                     renewed_contract_id = raw_renewed.zfill(8)
 
-            # --- ADD-ON LOGIC ---
             elif opp_type == "Add-On" and acc_id_col_opp:
                 cust_story_temp = df_opp[df_opp[acc_id_col_opp].astype(str).str.strip() == acc_id].copy()
                 of_family = get_product_family(of_products)
@@ -358,7 +342,7 @@ def run_v6_storytelling_engine(pdf_name, pdf_start_date, input_opp_id="", opp_ty
                          renewals[sort_col] = pd.to_datetime(renewals[sort_col], errors='coerce')
                          renewals = renewals.sort_values(by=sort_col, ascending=False)
 
-                    for , ren in renewals.iterrows():
+                    for _, ren in renewals.iterrows():
                         candidate_contract = str(ren.get(renewed_col, '')).replace('.0', '').strip().zfill(8)
                         if candidate_contract and candidate_contract.lower() not in ['nan', 'none', '00000nan', '']:
                             temp_subs = df_sub[df_sub[contract_col_sub].astype(str).fillna('').str.replace('.0', '', regex=False).str.strip().str.zfill(8) == candidate_contract]
@@ -394,12 +378,10 @@ def run_v6_storytelling_engine(pdf_name, pdf_start_date, input_opp_id="", opp_ty
             if acc_id_col_opp:
                 cust_story_records = df_opp[df_opp[acc_id_col_opp].astype(str).str.strip() == acc_id].to_dict('records')
         
-        # Pull Subscription Lines based on located Contract
         if renewed_contract_id and contract_col_sub:
             df_sub['Clean_Contract'] = df_sub[contract_col_sub].astype(str).fillna('').str.replace('.0', '', regex=False).str.strip().str.zfill(8)
             subs_match = df_sub[df_sub['Clean_Contract'] == renewed_contract_id]
             
-            # 💡 AGGRESSIVE RENEWAL FALLBACK: If standard mapping fails
             if subs_match.empty and acc_id and opp_type == "Renewal" and acc_id_col_opp and opp_id_col_sub:
                 account_opps = df_opp[df_opp[acc_id_col_opp].astype(str).str.strip() == acc_id]
                 if stage_col:
@@ -420,7 +402,7 @@ def run_v6_storytelling_engine(pdf_name, pdf_start_date, input_opp_id="", opp_ty
             
             if not subs_match.empty:
                 prev_opp_id = str(subs_match.iloc[0].get(opp_id_col_sub, '')).replace('.0', '').strip()
-                for , row in subs_match.iterrows():
+                for _, row in subs_match.iterrows():
                     cust_subs.append({
                         "Product Name": row.get(prod_name_col_sub, 'Unknown') if prod_name_col_sub else 'Unknown', 
                         "Quantity": parse_amount(row.get(qty_col_sub, '0')) if qty_col_sub else 0.0, 
@@ -440,14 +422,9 @@ def run_v6_storytelling_engine(pdf_name, pdf_start_date, input_opp_id="", opp_ty
         }
     except Exception as e: return {"error": f"Database Error: {str(e)}"}
 
-
---- Streamlit UI ---
-
+# --- Streamlit UI ---
 st.set_page_config(page_title="V2.4 Master Pre-Audit", layout="wide")
 st.title("🛡️ FinOps V2.4: The Storytelling Pre-Audit")
-
-
-Initialize session
 
 if 'run_audit' not in st.session_state: st.session_state.run_audit = False
 if 'curr_data' not in st.session_state: st.session_state.curr_data = None
@@ -508,9 +485,11 @@ if st.session_state.story:
             if story.get('prev_opp_id'):
                 found = search_gdrive(c_data['account_name'], story.get('prev_opp_id', ''))
                 if found:
-                    sel = st.selectbox("Select Prior OF from Drive:", found, format_func=lambda x: x.split('/')[-1])
+                    sel = st.selectbox("Select Prior OF from Drive:", found, format_func=lambda x: x['name'])
                     if sel: 
-                        st.session_state.prior_data = extract_master_data(sel)
+                        with st.spinner("Downloading prior OF from Google Drive..."):
+                            file_stream = download_from_gdrive(sel['id'])
+                            st.session_state.prior_data = extract_master_data(file_stream)
                 else: st.warning("No matching prior OF found in Drive.")
         elif opp_type == "Add-On":
             st.subheader("➕ Add-On Continuity")
@@ -540,7 +519,6 @@ with col_exec:
 
 with col_clear:
     if st.button("🧹 Clear Board (Delete Current OF & ID)", use_container_width=True):
-        # COMPLETE WIPE of revision state variables and force file uploader reset
         for key in ['run_audit', 'curr_data', 'prior_data', 'story', 'manual_opp_id']:
             if key in st.session_state: del st.session_state[key]
         st.session_state.uploader_key += 1
@@ -549,16 +527,10 @@ with col_clear:
 if st.session_state.run_audit and st.session_state.curr_data and st.session_state.story:
     c_data = st.session_state.curr_data; story = st.session_state.story
     st.header("🚨 Pre-Audit Findings")
-
-
-
     # 1. MSA Governance
     st.subheader("⚖️ MSA Governance")
     curr_msa_type = get_msa_type(c_data["msa_comment"])
     st.write(f"Current MSA Type: {curr_msa_type}")
-
-
-
     if opp_type == "New Business":
         if curr_msa_type == "Signed":
             st.warning("⚠️ Pre-Auditor Alert: The Signed MSA is vital to the OF signature. If this has not been processed, ensure you request it or send it for signature immediately.")
@@ -621,10 +593,6 @@ if st.session_state.run_audit and st.session_state.curr_data and st.session_stat
     # 3. Fees & Yearly Schedule Check
     st.subheader("💰 Fee Structure & Yearly Schedule Check")
     total_fee = c_data["fees"].get("total", 0.0)
-
-
-
-    # Calculate Line Item Sum
     sum_lines = sum([p.get('line_total', 0.0) for p in c_data['products']])
         
     if c_data.get("yearly_schedule"):
@@ -632,7 +600,6 @@ if st.session_state.run_audit and st.session_state.curr_data and st.session_stat
         years = sorted(c_data["yearly_schedule"].keys())
         yearly_sum = 0.0
         
-        # --- NEW LOGIC: Advanced CPQ Proration Multiplier for Add-Ons (Year 1 limit) ---
         annual_acv = sum_lines
         expected_prorated = sum_lines
         if opp_type == "Add-On":
@@ -686,7 +653,6 @@ if st.session_state.run_audit and st.session_state.curr_data and st.session_stat
                 schedule_data.append({"Year": f"Year {yr}", "Annual Fee": f"${current_fee:,.2f}", "Proration Check": check_str})
                 
             else:
-                # For Renewals/New Business, show standard YoY Uplift and YoY Increase
                 uplift_str = "Base"
                 yoy_inc_str = "-"
                 if i > 0:
@@ -714,9 +680,6 @@ if st.session_state.run_audit and st.session_state.curr_data and st.session_stat
 
     # 4. Product Comparison
     st.subheader(f"📦 Subscription Comparison ({opp_type})")
-
-
-
     net_new_product_added = False
     sfdc_prods = {}
     for s in story.get('subscriptions', []):
@@ -732,9 +695,6 @@ if st.session_state.run_audit and st.session_state.curr_data and st.session_stat
         
     of_prods = {normalize_name(p['name']): p for p in c_data['products']}
     comp = []
-
-
-
     term_years = max(1, round((pd.to_datetime(c_data['dates']['end']) - pd.to_datetime(c_data['dates']['start'])).days / 365.25)) if c_data['dates']['start'] else 1
 
     if opp_type == "Add-On":
@@ -752,9 +712,6 @@ if st.session_state.run_audit and st.session_state.curr_data and st.session_stat
     rev_class = story.get('revenue_class', 'UNKNOWN')
     expected_lp_qty = 0
     has_lp_in_of = any("learningpass" in k for k in of_prods.keys())
-
-
-
     if has_lp_in_of:
         if (opp_type == "Add-On" and net_new_product_added) or opp_type == "New Business" or opp_type == "Renewal":
             if "ENT" in rev_class:
@@ -784,7 +741,6 @@ if st.session_state.run_audit and st.session_state.curr_data and st.session_stat
         
         status = "🟢 Maintained"
         
-        # New Business Specific UI Simplification
         if opp_type == "New Business":
             if "learningpass" in k and has_lp_in_of:
                 if int(oqty) != expected_lp_qty:
@@ -800,7 +756,6 @@ if st.session_state.run_audit and st.session_state.curr_data and st.session_stat
                 "Status": status
             })
 
-        # Add-On Specific Status Logic
         elif opp_type == "Add-On":
             if "learningpass" in k and oqty > 0:
                 if not net_new_product_added:
@@ -816,7 +771,6 @@ if st.session_state.run_audit and st.session_state.curr_data and st.session_stat
             else:
                 status = "🟢 Maintained"
                 
-            # Tier Validation Override
             if "support" in k and of_supp:
                 status = "❌ Tier Changed" if normalize_name(sfdc_supp_name) != normalize_name(of_supp_name) else "🟢 Tier Maintained"
             elif "platform" in k and of_plat:
@@ -831,7 +785,6 @@ if st.session_state.run_audit and st.session_state.curr_data and st.session_stat
                 "Status": status
             })
 
-        # Standard Logic (Renewal)
         else:
             if "learningpass" in k and has_lp_in_of:
                 if int(oqty) != expected_lp_qty:
@@ -849,7 +802,6 @@ if st.session_state.run_audit and st.session_state.curr_data and st.session_stat
             elif int(oqty) < int(exp): 
                 status = f"🟡 Downsell ({int(oqty-exp)})"
 
-            # Tier Validation Override
             if "support" in k:
                 status = "❌ Tier Changed" if normalize_name(sfdc_supp_name) != normalize_name(of_supp_name) else "🟢 Tier Maintained"
             elif "platform" in k:
