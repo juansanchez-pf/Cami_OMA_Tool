@@ -20,24 +20,25 @@ if 'logged_in' not in st.session_state:
 # 3. Define the Login Gate
 def login_gate():
     if not st.session_state['logged_in']:
-        # [2, 1, 2] makes the center column small and the sides large
-        left_co, cent_co, last_co = st.columns([2, 1, 2])
+        # This [2, 1.2, 2] ratio forces the center to be narrow
+        col1, col2, col3 = st.columns([2, 1.2, 2])
         
-        with cent_co:
-            # Add some vertical space to push it down from the top
-            for _ in range(5): st.write("") 
+        with col2: # Everything MUST be indented under this 'with col2'
+            for _ in range(8): st.write("") # Push it down from the top
             
             with st.container(border=True):
-                st.markdown("<h2 style='text-align: center;'>🔒 OMA Tool Login</h2>", unsafe_allow_html=True)
+                st.markdown("<h3 style='text-align: center;'>🔒 OMA Tool Login</h3>", unsafe_allow_html=True)
+                st.caption("<p style='text-align: center;'>v1.1 - Centered Layout</p>", unsafe_allow_html=True)
                 
-                password = st.text_input("Password", type="password", label_visibility="collapsed")
+                # COLLAPSED label makes the text box look cleaner
+                password = st.text_input("Password", type="password", label_visibility="collapsed", placeholder="Enter Password")
                 
                 if st.button("Login", use_container_width=True):
                     if password == "Coupa2026!":
                         st.session_state['logged_in'] = True
                         st.rerun()
                     else:
-                        st.error("❌ Incorrect password")
+                        st.error("❌ Incorrect")
         st.stop()
 
 # Run the gate
