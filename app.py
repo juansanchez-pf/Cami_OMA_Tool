@@ -25,6 +25,9 @@ def login_gate():
         left_co, cent_co, last_co = st.columns([1, 1, 1])
         
         with cent_co:
+            with st.container(border=True): # This adds the "card" border
+                st.title("🔒 OMA Tool Login")
+        with cent_co:
             st.write("\n" * 5) # Adds some space at the top
             st.title("🔒 OMA Tool Login")
             
