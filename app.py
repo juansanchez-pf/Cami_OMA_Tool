@@ -10,6 +10,15 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 from datetime import datetime
 
+# 🛑 --- PASSWORD GATES --- 🛑
+st.title("🔒 OMA Tool Login")
+password = st.text_input("Enter the team password:", type="password")
+
+# Change "Coupa2026!" to whatever password you want to share with your team
+if password != "Coupa2026":
+    st.warning("Please enter the correct password to access the tool.")
+    st.stop() # This stops the rest of the app from loading!
+
 # --- Configure Logging ---
 logging.getLogger("pdfminer").setLevel(logging.ERROR)
 
