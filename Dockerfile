@@ -15,4 +15,4 @@ COPY . .
 EXPOSE 8080
 
 # Command to run the Streamlit app
-CMD ["streamlit", "run", "python-Code.py", "--server.port=8080", "--server.address=0.0.0.0"]
+CMD ["streamlit", "run", "Python-Code", "--server.port=8080", "--server.address=0.0.0.0"]
