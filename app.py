@@ -10,19 +10,29 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 from datetime import datetime
 
+# 1. Page Config always at the very top
 st.set_page_config(page_title="V2.4 Master Pre-Audit", layout="wide")
 
-# 🛑 --- PASSWORD GATES --- 🛑
-st.title("🔒 OMA Tool Login")
-password = st.text_input("Enter the team password:", type="password")
+# 2. Initialize login state
+if 'logged_in' not in st.session_state:
+    st.session_state['logged_in'] = False
 
-# Change "Coupa2026!" to whatever password you want to share with your team
-if password != "Coupa2026":
-    st.warning("Please enter the correct password to access the tool.")
-    st.stop() # This stops the rest of the app from loading!
+# 3. Define the Login Gate
+def login_gate():
+    if not st.session_state['logged_in']:
+        st.title("🔒 OMA Tool Login")
+        password = st.text_input("Enter the team password:", type="password")
+        
+        if st.button("Login"):
+            if password == "Coupa2026!":
+                st.session_state['logged_in'] = True
+                st.rerun()  # Refresh the app to clear the login screen
+            else:
+                st.error("Incorrect password")
+        st.stop()
 
-# --- Configure Logging ---
-logging.getLogger("pdfminer").setLevel(logging.ERROR)
+# Run the gate
+login_gate()
 
 # --- Local Caching Setup ---
 CACHE_DIR = "sfdc_cache"
