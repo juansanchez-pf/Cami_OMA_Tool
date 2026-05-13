@@ -20,15 +20,18 @@ if 'logged_in' not in st.session_state:
 # 3. Define the Login Gate
 def login_gate():
     if not st.session_state['logged_in']:
-        # Create 3 columns: [Left space, Center content, Right space]
-        # The numbers [1, 2, 1] represent the ratio of width
-        left_co, cent_co, last_co = st.columns([1, 2, 1])
+        # Create 3 columns. [1, 1, 1] means three equal pieces.
+        # To make the center even smaller, try [2, 1, 2]
+        left_co, cent_co, last_co = st.columns([1, 1, 1])
         
         with cent_co:
+            st.write("\n" * 5) # Adds some space at the top
             st.title("🔒 OMA Tool Login")
+            
             password = st.text_input("Enter the team password:", type="password")
             
-            if st.button("Login", use_container_width=True): # Makes the button fit the column
+            # use_container_width=True makes the button match the narrow column
+            if st.button("Login", use_container_width=True):
                 if password == "Coupa2026!":
                     st.session_state['logged_in'] = True
                     st.rerun()
