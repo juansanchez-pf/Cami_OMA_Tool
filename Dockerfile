@@ -19,4 +19,4 @@ EXPOSE 8080
 
 # 5. Run the Streamlit app 
 # (Changed to match your filename "Python-Code")
-CMD ["streamlit", "run", "app.py", "--server.port=8080", "--server.address=0.0.0.0"]
+CMD ["streamlit", "run", "app.py", "--server.port=8080", "--server.address=0.0.0.0", "--server.headless=true"]
