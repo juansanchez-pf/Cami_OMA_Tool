@@ -10,6 +10,8 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 from datetime import datetime
 
+st.set_page_config(page_title="V2.4 Master Pre-Audit", layout="wide")
+
 # 🛑 --- PASSWORD GATES --- 🛑
 st.title("🔒 OMA Tool Login")
 password = st.text_input("Enter the team password:", type="password")
@@ -432,7 +434,7 @@ def run_v6_storytelling_engine(pdf_name, pdf_start_date, input_opp_id="", opp_ty
     except Exception as e: return {"error": f"Database Error: {str(e)}"}
 
 # --- Streamlit UI ---
-st.set_page_config(page_title="V2.4 Master Pre-Audit", layout="wide")
+
 st.title("🛡️ FinOps V2.4: The Storytelling Pre-Audit")
 
 if 'run_audit' not in st.session_state: st.session_state.run_audit = False
