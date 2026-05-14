@@ -15,9 +15,7 @@ st.set_page_config(page_title="V4.0 Master Pre-Audit", layout="wide")
 
 # --- 🚨 GOOGLE OAUTH & DRIVE CONFIGURATION 🚨 ---
 GDRIVE_DB_FOLDER_ID = "1GDLumdapathdoEHZwGfc8b3bkRHx3s57"
-CLIENT_SECRETS_FILE = "CLIENT_SECRET_JSON"
 SCOPES = ['https://www.googleapis.com/auth/drive']
-# ESTA URL DEBE SER EXACTAMENTE LA DE TU CLOUD RUN (SIN BARRA AL FINAL)
 REDIRECT_URI = "https://oma-tool-257372633450.us-central1.run.app"
 
 # Configure Logging
@@ -25,8 +23,21 @@ logging.getLogger("pdfminer").setLevel(logging.ERROR)
 
 # 2. Funciones de Autenticación OAuth Web
 def get_flow():
-    return Flow.from_client_secrets_file(
-        CLIENT_SECRETS_FILE,
+    import json
+    
+    # 1. Leer el secreto encriptado desde las variables de entorno de Cloud Run
+    secret_string = os.environ.get('CLIENT_SECRET_JSON')
+    
+    if not secret_string:
+        st.error("❌ Error Crítico: No se encontró la variable CLIENT_SECRET_JSON en Google Cloud.")
+        st.stop()
+        
+    # 2. Convertir el texto JSON en un diccionario de Python
+    client_config = json.loads(secret_string)
+    
+    # 3. Usar from_client_config en lugar de from_client_secrets_file
+    return Flow.from_client_config(
+        client_config=client_config,
         scopes=SCOPES,
         redirect_uri=REDIRECT_URI
     )
