@@ -7,11 +7,11 @@ import os
 import io
 import google.auth
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload
+from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 from datetime import datetime
 
 # 1. Page Config always at the very top
-st.set_page_config(page_title="V2.4 Master Pre-Audit", layout="wide")
+st.set_page_config(page_title="V3.1 Master Pre-Audit", layout="wide")
 
 # 2. Initialize login state
 if 'logged_in' not in st.session_state:
@@ -28,7 +28,7 @@ def login_gate():
             
             with st.container(border=True):
                 st.markdown("<h3 style='text-align: center;'>🔒 OMA Tool Login</h3>", unsafe_allow_html=True)
-                st.caption("<p style='text-align: center;'>v1.1 - Centered Layout</p>", unsafe_allow_html=True)
+                st.caption("<p style='text-align: center;'>v3.1 - Cloud Edition</p>", unsafe_allow_html=True)
                 
                 # COLLAPSED label makes the text box look cleaner
                 password = st.text_input("Password", type="password", label_visibility="collapsed", placeholder="Enter Password")
@@ -44,31 +44,22 @@ def login_gate():
 # Run the gate
 login_gate()
 
-# --- Local Caching Setup ---
-CACHE_DIR = "sfdc_cache"
-if not os.path.exists(CACHE_DIR):
-    os.makedirs(CACHE_DIR)
+# --- Configure Logging ---
+logging.getLogger("pdfminer").setLevel(logging.ERROR)
 
-PATH_ACCOUNTS = os.path.join(CACHE_DIR, "rep_accounts.csv")
-PATH_SUBS = os.path.join(CACHE_DIR, "rep_subscriptions.csv")
-PATH_OPPS = os.path.join(CACHE_DIR, "rep_opportunities.csv")
-
-# --- 🚨 ADD YOUR GOOGLE DRIVE FOLDER IDs HERE 🚨 ---
-GDRIVE_FOLDER_IDS = [
-    "1NEkV3QHuPMKj20cOhffXyInTHZisS2hW",  # e.g., DD APJ
-    "8pvMv5B3tNqkOV6tMwiDHHl9_GYv9_9",  # e.g., DD EMEA
-    "1liTp0NXeu3RwNa4eaJzzfwNPXnx_J7Vk"   # e.g., DD NA LATAM
-]
+# --- 🚨 GOOGLE DRIVE CONFIGURATION 🚨 ---
+# Create a folder in Drive for the Database, share it with the service account as Editor, and paste the ID here
+GDRIVE_DB_FOLDER_ID = "1Kvz45V2pW2oPd0eWYNULanbqn4p"
 
 # --- Google Drive API Setup ---
 @st.cache_resource
 def get_gdrive_service():
     """Authenticates with Google Cloud automatically using the Cloud Run Service Account."""
-    credentials, project = google.auth.default(scopes=['https://www.googleapis.com/auth/drive.readonly'])
+    credentials, project = google.auth.default(scopes=['https://www.googleapis.com/auth/drive'])
     return build('drive', 'v3', credentials=credentials)
 
 def download_from_gdrive(file_id):
-    """Downloads a PDF from Google Drive directly into memory so pdfplumber can read it."""
+    """Downloads a file from Google Drive directly into memory."""
     service = get_gdrive_service()
     request = service.files().get_media(fileId=file_id)
     file_stream = io.BytesIO()
@@ -79,9 +70,60 @@ def download_from_gdrive(file_id):
     file_stream.seek(0)
     return file_stream
 
+def upload_csv_to_gdrive(df, filename):
+    """Uploads or Overwrites a CSV in the Google Drive Database Folder."""
+    service = get_gdrive_service()
+    
+    # Check if file already exists
+    query = f"'{GDRIVE_DB_FOLDER_ID}' in parents and name='{filename}' and trashed=false"
+    results = service.files().list(q=query, spaces='drive', fields="files(id, name)", supportsAllDrives=True, includeItemsFromAllDrives=True).execute()
+    items = results.get('files', [])
+    
+    csv_buffer = io.BytesIO()
+    df.to_csv(csv_buffer, index=False)
+    csv_buffer.seek(0)
+    
+    media = MediaIoBaseUpload(csv_buffer, mimetype='text/csv', resumable=True)
+    
+    if items:
+        # Overwrite existing file to keep the folder clean
+        file_id = items[0]['id']
+        service.files().update(fileId=file_id, media_body=media, supportsAllDrives=True).execute()
+    else:
+        # Create new file
+        file_metadata = {'name': filename, 'parents': [GDRIVE_DB_FOLDER_ID]}
+        service.files().create(body=file_metadata, media_body=media, supportsAllDrives=True).execute()
+
+@st.cache_data(show_spinner=False)
+def load_db_from_gdrive():
+    """Fetches the 3 Salesforce CSVs directly from Google Drive into Pandas."""
+    service = get_gdrive_service()
+    query = f"'{GDRIVE_DB_FOLDER_ID}' in parents and trashed=false"
+    db = {"opps": pd.DataFrame(), "subs": pd.DataFrame(), "accs": pd.DataFrame()}
+    
+    if GDRIVE_DB_FOLDER_ID == "PASTE_YOUR_DATABASE_FOLDER_ID_HERE":
+        return db
+
+    try:
+        results = service.files().list(q=query, spaces='drive', fields="files(id, name)", supportsAllDrives=True, includeItemsFromAllDrives=True).execute()
+        items = results.get('files', [])
+        
+        for item in items:
+            name = item['name']
+            file_id = item['id']
+            if name == "rep_opportunities.csv":
+                db["opps"] = pd.read_csv(download_from_gdrive(file_id), dtype=str)
+            elif name == "rep_subscriptions.csv":
+                db["subs"] = pd.read_csv(download_from_gdrive(file_id), dtype=str)
+            elif name == "rep_accounts.csv":
+                db["accs"] = pd.read_csv(download_from_gdrive(file_id), dtype=str)
+    except Exception as e:
+        logging.error(f"Error loading DB from Drive: {e}")
+    return db
+
 @st.cache_data(show_spinner=False)
 def search_gdrive(account_name, prior_id=""):
-    """Searches Shared Drives using the Google Drive API."""
+    """Global Search across all Shared Drives the Service Account has access to."""
     service = get_gdrive_service()
     found_files = []
     
@@ -89,26 +131,43 @@ def search_gdrive(account_name, prior_id=""):
     query_parts = [f"name contains '{word}'" for word in core_words]
     name_query = " and ".join(query_parts)
     
-    for folder_id in GDRIVE_FOLDER_IDS:
-        if not folder_id or folder_id.startswith("PASTE"): continue
+    # Using corpora='allDrives' searches everywhere, ignoring specific folder restrictions
+    query = f"mimeType='application/pdf' and ({name_query}) and trashed=false"
+    try:
+        results = service.files().list(
+            q=query, 
+            spaces='drive',
+            corpora='allDrives',
+            fields="files(id, name)", 
+            supportsAllDrives=True, 
+            includeItemsFromAllDrives=True
+        ).execute()
         
-        query = f"'{folder_id}' in parents and mimeType='application/pdf' and ({name_query})"
-        try:
-            results = service.files().list(
-                q=query, 
-                spaces='drive', 
-                fields="files(id, name)", 
-                supportsAllDrives=True, 
-                includeItemsFromAllDrives=True
-            ).execute()
-            
-            items = results.get('files', [])
-            for item in items:
-                found_files.append({"name": item['name'], "id": item['id']})
-        except Exception as e:
-            logging.error(f"Drive API error: {e}")
-            
+        items = results.get('files', [])
+        for item in items:
+            found_files.append({"name": item['name'], "id": item['id']})
+    except Exception as e:
+        logging.error(f"Drive API error: {e}")
+        
     return found_files
+
+def identify_and_save_files(uploaded_files):
+    """Standardizes and stores reports into the Google Drive Database."""
+    for f in uploaded_files:
+        try:
+            f.seek(0); df = pd.read_csv(f, encoding='utf-8', dtype=str)
+        except:
+            f.seek(0); df = pd.read_csv(f, encoding='ISO-8859-1', dtype=str)
+        cols = [c.lower() for c in df.columns]
+        if 'renewed contract' in cols or 'commission date' in cols: 
+            upload_csv_to_gdrive(df, "rep_opportunities.csv")
+        elif 'sub qty' in cols or 'contract name' in cols: 
+            upload_csv_to_gdrive(df, "rep_subscriptions.csv")
+        elif 'account id 18 characters' in cols: 
+            upload_csv_to_gdrive(df, "rep_accounts.csv")
+            
+    # Clear the cache so the app pulls the fresh data immediately
+    load_db_from_gdrive.clear()
 
 # --- Helper Functions ---
 def normalize_name(name):
@@ -168,8 +227,9 @@ def extract_master_data(pdf_file):
                         row_str = str(row)
                         if "USD" in row_str or "Included" in row_str:
                             raw_names_text = str(row[0])
-                            raw_names_text = re.sub(r'\s-\s\n\s', ' - ', raw_names_text)
+                            raw_names_text = re.sub(r'\s*-\s*\n\s*', ' - ', raw_names_text)
                             raw_names = [n.strip() for n in raw_names_text.split('\n') if n.strip() and n.strip() != "Product Name"]
+                            
                             raw_qtys = [q.strip() for q in str(row[2]).split('\n') if q.strip() and q.strip() != "Qty."]
                             
                             raw_totals = []
@@ -205,15 +265,15 @@ def extract_master_data(pdf_file):
     msa_match = re.search(r"((?:The Coupa subscriptions ordered above|The subscriptions in this Order Form|This Order Form is).*?governed by.*?(?:Privacy Terms[\"']?\.?|subprocessors\.?|master-subscription-agreement/\.?))", clean_text, re.IGNORECASE)
     data["msa_comment"] = msa_match.group(1).strip() if msa_match else ""
 
-    yearly_fees = re.findall(r"Total Year (\d+)(?:\sProrated)?\sFee:\sUSD\s([\d,.]+)", data["text"], re.IGNORECASE)
+    yearly_fees = re.findall(r"Total Year (\d+)(?:\s*Prorated)?\s*Fee:\s*USD\s*([\d,.]+)", data["text"], re.IGNORECASE)
     data["yearly_schedule"] = {int(y): parse_amount(v) for y, v in yearly_fees}
     
     address_block = re.search(r"Billing\s+Info.*?(?=Accounts Payable|Signature|$)", data["text"], re.DOTALL | re.IGNORECASE)
     has_address_data = False
     if address_block:
         block_text = address_block.group(0)
-        has_address_data = bool(re.search(r"Entity Name:\s[a-zA-Z0-9]", block_text, re.IGNORECASE) or 
-                                re.search(r"Address:\s[a-zA-Z0-9]", block_text, re.IGNORECASE))
+        has_address_data = bool(re.search(r"Entity Name:\s*[a-zA-Z0-9]", block_text, re.IGNORECASE) or 
+                                re.search(r"Address:\s*[a-zA-Z0-9]", block_text, re.IGNORECASE))
                                 
     ap_contact_match = re.search(r"Accounts Payable Contact:\s*(.*?)(?=Accounts Payable Email|Signature|$|\n)", data["text"], re.IGNORECASE)
     ap_email_match = re.search(r"Accounts Payable Email:\s*(.*?)(?=Accounts Payable Contact|Signature|$|\n)", data["text"], re.IGNORECASE)
@@ -225,23 +285,12 @@ def extract_master_data(pdf_file):
         "has_shipping_content": has_address_data
     }
 
-    total_match = re.search(r"Total Fee:\sUSD\s([\d,.]+)", data["text"], re.IGNORECASE)
+    total_match = re.search(r"Total Fee:\s*USD\s*([\d,.]+)", data["text"], re.IGNORECASE)
     if total_match: data["fees"]["total"] = parse_amount(total_match.group(1))
-    sub_match = re.search(r"Total Subscription Fees?[^\d]([\d,.]+)", data["text"], re.IGNORECASE)
+    sub_match = re.search(r"Total Subscription Fees?[^\d]*([\d,.]+)", data["text"], re.IGNORECASE)
     if sub_match: data["fees"]["total_subscription"] = parse_amount(sub_match.group(1))
 
     return data
-
-def identify_and_save_files(uploaded_files):
-    for f in uploaded_files:
-        try:
-            f.seek(0); df = pd.read_csv(f, encoding='utf-8', dtype=str)
-        except:
-            f.seek(0); df = pd.read_csv(f, encoding='ISO-8859-1', dtype=str)
-        cols = [c.lower() for c in df.columns]
-        if 'renewed contract' in cols or 'commission date' in cols: df.to_csv(PATH_OPPS, index=False)
-        elif 'sub qty' in cols or 'contract name' in cols: df.to_csv(PATH_SUBS, index=False)
-        elif 'account id 18 characters' in cols: df.to_csv(PATH_ACCOUNTS, index=False)
 
 def get_best_col(cols, exact_list, partial_list):
     if cols is None or len(cols) == 0: return None
@@ -261,14 +310,11 @@ def get_best_col(cols, exact_list, partial_list):
 
 def run_v6_storytelling_engine(pdf_name, pdf_start_date, input_opp_id="", opp_type="Renewal", of_products=[]):
     try:
-        def load_csv_safe(filepath):
-            if not os.path.exists(filepath): return pd.DataFrame()
-            try: return pd.read_csv(filepath, dtype=str, encoding='utf-8')
-            except: return pd.read_csv(filepath, dtype=str, encoding='ISO-8859-1')
-            
-        df_opp = load_csv_safe(PATH_OPPS)
-        df_sub = load_csv_safe(PATH_SUBS)
-        df_acc = load_csv_safe(PATH_ACCOUNTS)
+        # Load from Google Drive Cache
+        db = load_db_from_gdrive()
+        df_opp = db.get("opps", pd.DataFrame())
+        df_sub = db.get("subs", pd.DataFrame())
+        df_acc = db.get("accs", pd.DataFrame())
         
         if df_opp.empty or df_sub.empty:
             return {"acc_id": "", "prev_opp_id": "", "renewed_contract_id": "", "subscriptions": [], "opp_history": [], "revenue_class": "Unknown", "account_type": "Unknown", "active_contracts": []}
@@ -455,7 +501,7 @@ def run_v6_storytelling_engine(pdf_name, pdf_start_date, input_opp_id="", opp_ty
 
 # --- Streamlit UI ---
 
-st.title("🛡️ FinOps V2.4: The Storytelling Pre-Audit")
+st.title("🛡️ FinOps V3.1: The Storytelling Pre-Audit")
 
 if 'run_audit' not in st.session_state: st.session_state.run_audit = False
 if 'curr_data' not in st.session_state: st.session_state.curr_data = None
@@ -464,13 +510,19 @@ if 'story' not in st.session_state: st.session_state.story = None
 if 'manual_opp_id' not in st.session_state: st.session_state.manual_opp_id = ""
 
 with st.sidebar:
-    st.header("🗄️ SFDC Database")
-    ready = os.path.exists(PATH_ACCOUNTS) and os.path.exists(PATH_SUBS) and os.path.exists(PATH_OPPS)
-    if ready: st.success("✅ Database Ready")
-    else: st.warning("⚠️ Upload 3 CSV Reports")
-    with st.expander("📂 Database Manager"):
+    st.header("🗄️ Cloud Database Manager")
+    if GDRIVE_DB_FOLDER_ID == "1Kvz45V2pW2oPd0eWYNULanbqn4p-hHsm":
+        st.error("⚠️ Drive Folder ID not configured in script.")
+    else:
+        st.success("✅ Connected to Google Drive DB")
+        
+    with st.expander("📂 Update Database"):
         files = st.file_uploader("Upload CSVs (Bulk)", type="csv", accept_multiple_files=True)
-        if files and st.button("Rebuild Database"): identify_and_save_files(files); st.rerun()
+        if files and st.button("Sync to Google Drive"):
+            with st.spinner("Uploading and updating database in Cloud..."):
+                identify_and_save_files(files)
+            st.success("Synced successfully!")
+            st.rerun()
     st.divider()
     opp_type = st.selectbox("Current Opportunity Type:", ["Renewal", "Add-On", "New Business"])
 
@@ -489,7 +541,8 @@ with col1:
         st.session_state.manual_opp_id = user_opp_id
         
         if st.button("🔍 Map Customer Journey"):
-            st.session_state.story = run_v6_storytelling_engine(c_data['account_name'], c_data['dates']['start'], user_opp_id, opp_type, c_data.get('products', []))
+            with st.spinner("Querying Cloud Database..."):
+                st.session_state.story = run_v6_storytelling_engine(c_data['account_name'], c_data['dates']['start'], user_opp_id, opp_type, c_data.get('products', []))
         
         if st.session_state.story and st.session_state.story.get('opp_history'):
             st.divider()
@@ -514,7 +567,8 @@ if st.session_state.story:
             st.write(f"Renewed Contract: {story.get('renewed_contract_id', 'Unknown')}")
             st.write(f"Previous Deal ID: {story.get('prev_opp_id', 'Unknown')}")
             if story.get('prev_opp_id'):
-                found = search_gdrive(c_data['account_name'], story.get('prev_opp_id', ''))
+                with st.spinner("Searching Global Drive..."):
+                    found = search_gdrive(c_data['account_name'], story.get('prev_opp_id', ''))
                 if found:
                     sel = st.selectbox("Select Prior OF from Drive:", found, format_func=lambda x: x['name'])
                     if sel: 
@@ -701,7 +755,7 @@ if st.session_state.run_audit and st.session_state.curr_data and st.session_stat
         
         col_t1, col_t2 = st.columns(2)
         col_t1.metric("Stated OF Total Fee", f"${total_fee:,.2f}")
-        col_t2.metric("Calculated Sum of Line Items", f"${sum_lines:,.2f}")
+        col_t2.metric("Calculated Yearly Schedule Sum", f"${yearly_sum:,.2f}")
         
         if total_fee > 0:
             if abs(yearly_sum - total_fee) > 1.0: 
@@ -801,7 +855,8 @@ if st.session_state.run_audit and st.session_state.curr_data and st.session_stat
                 status = f"📈 Qty Increase (Base: {int(sqty)})"
             else:
                 status = "🟢 Maintained"
-                
+
+            # Tier validation directly injected into status
             if "support" in k and of_supp:
                 status = "❌ Tier Changed" if normalize_name(sfdc_supp_name) != normalize_name(of_supp_name) else "🟢 Tier Maintained"
             elif "platform" in k and of_plat:
@@ -832,12 +887,13 @@ if st.session_state.run_audit and st.session_state.curr_data and st.session_stat
                 status = f"🟠 Upsell (+{int(oqty-exp)})"
             elif int(oqty) < int(exp): 
                 status = f"🟡 Downsell ({int(oqty-exp)})"
-
+                
+            # Tier validation directly injected into status
             if "support" in k:
                 status = "❌ Tier Changed" if normalize_name(sfdc_supp_name) != normalize_name(of_supp_name) else "🟢 Tier Maintained"
             elif "platform" in k:
                 status = "❌ Tier Changed" if normalize_name(sfdc_plat_name) != normalize_name(of_plat_name) else "🟢 Tier Maintained"
-                
+
             comp.append({
                 "Product": name, 
                 "SFDC Base": int(sqty), 
