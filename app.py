@@ -20,17 +20,15 @@ if 'logged_in' not in st.session_state:
 # 3. Define the Login Gate
 def login_gate():
     if not st.session_state['logged_in']:
-        # This [2, 1.2, 2] ratio forces the center to be narrow
         col1, col2, col3 = st.columns([2, 1.2, 2])
         
-        with col2: # Everything MUST be indented under this 'with col2'
-            for _ in range(8): st.write("") # Push it down from the top
+        with col2: 
+            for _ in range(8): st.write("") 
             
             with st.container(border=True):
                 st.markdown("<h3 style='text-align: center;'>🔒 OMA Tool Login</h3>", unsafe_allow_html=True)
                 st.caption("<p style='text-align: center;'>v3.1 - Cloud Edition</p>", unsafe_allow_html=True)
                 
-                # COLLAPSED label makes the text box look cleaner
                 password = st.text_input("Password", type="password", label_visibility="collapsed", placeholder="Enter Password")
                 
                 if st.button("Login", use_container_width=True):
@@ -48,8 +46,7 @@ login_gate()
 logging.getLogger("pdfminer").setLevel(logging.ERROR)
 
 # --- 🚨 GOOGLE DRIVE CONFIGURATION 🚨 ---
-# Create a folder in Drive for the Database, share it with the service account as Editor, and paste the ID here
-GDRIVE_DB_FOLDER_ID = "1Kvz45V2pW2oPd0eWYNULanbqn4p"
+GDRIVE_DB_FOLDER_ID = "1GDLumdapathdoEHZwGfc8b3bkRHx3s57"
 
 # --- Google Drive API Setup ---
 @st.cache_resource
@@ -74,7 +71,6 @@ def upload_csv_to_gdrive(df, filename):
     """Uploads or Overwrites a CSV in the Google Drive Database Folder."""
     service = get_gdrive_service()
     
-    # Check if file already exists
     query = f"'{GDRIVE_DB_FOLDER_ID}' in parents and name='{filename}' and trashed=false"
     results = service.files().list(q=query, spaces='drive', fields="files(id, name)", supportsAllDrives=True, includeItemsFromAllDrives=True).execute()
     items = results.get('files', [])
@@ -86,24 +82,19 @@ def upload_csv_to_gdrive(df, filename):
     media = MediaIoBaseUpload(csv_buffer, mimetype='text/csv', resumable=True)
     
     if items:
-        # Overwrite existing file to keep the folder clean
         file_id = items[0]['id']
         service.files().update(fileId=file_id, media_body=media, supportsAllDrives=True).execute()
     else:
-        # Create new file
         file_metadata = {'name': filename, 'parents': [GDRIVE_DB_FOLDER_ID]}
         service.files().create(body=file_metadata, media_body=media, supportsAllDrives=True).execute()
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, ttl=60)
 def load_db_from_gdrive():
     """Fetches the 3 Salesforce CSVs directly from Google Drive into Pandas."""
     service = get_gdrive_service()
     query = f"'{GDRIVE_DB_FOLDER_ID}' in parents and trashed=false"
     db = {"opps": pd.DataFrame(), "subs": pd.DataFrame(), "accs": pd.DataFrame()}
     
-    if GDRIVE_DB_FOLDER_ID == "PASTE_YOUR_DATABASE_FOLDER_ID_HERE":
-        return db
-
     try:
         results = service.files().list(q=query, spaces='drive', fields="files(id, name)", supportsAllDrives=True, includeItemsFromAllDrives=True).execute()
         items = results.get('files', [])
@@ -131,7 +122,6 @@ def search_gdrive(account_name, prior_id=""):
     query_parts = [f"name contains '{word}'" for word in core_words]
     name_query = " and ".join(query_parts)
     
-    # Using corpora='allDrives' searches everywhere, ignoring specific folder restrictions
     query = f"mimeType='application/pdf' and ({name_query}) and trashed=false"
     try:
         results = service.files().list(
@@ -166,7 +156,6 @@ def identify_and_save_files(uploaded_files):
         elif 'account id 18 characters' in cols: 
             upload_csv_to_gdrive(df, "rep_accounts.csv")
             
-    # Clear the cache so the app pulls the fresh data immediately
     load_db_from_gdrive.clear()
 
 # --- Helper Functions ---
@@ -310,7 +299,6 @@ def get_best_col(cols, exact_list, partial_list):
 
 def run_v6_storytelling_engine(pdf_name, pdf_start_date, input_opp_id="", opp_type="Renewal", of_products=[]):
     try:
-        # Load from Google Drive Cache
         db = load_db_from_gdrive()
         df_opp = db.get("opps", pd.DataFrame())
         df_sub = db.get("subs", pd.DataFrame())
@@ -511,10 +499,8 @@ if 'manual_opp_id' not in st.session_state: st.session_state.manual_opp_id = ""
 
 with st.sidebar:
     st.header("🗄️ Cloud Database Manager")
-    if GDRIVE_DB_FOLDER_ID == "1Kvz45V2pW2oPd0eWYNULanbqn4p-hHsm":
-        st.error("⚠️ Drive Folder ID not configured in script.")
-    else:
-        st.success("✅ Connected to Google Drive DB")
+    
+    st.success("✅ Connected to Google Drive DB")
         
     with st.expander("📂 Update Database"):
         files = st.file_uploader("Upload CSVs (Bulk)", type="csv", accept_multiple_files=True)
@@ -887,8 +873,7 @@ if st.session_state.run_audit and st.session_state.curr_data and st.session_stat
                 status = f"🟠 Upsell (+{int(oqty-exp)})"
             elif int(oqty) < int(exp): 
                 status = f"🟡 Downsell ({int(oqty-exp)})"
-                
-            # Tier validation directly injected into status
+
             if "support" in k:
                 status = "❌ Tier Changed" if normalize_name(sfdc_supp_name) != normalize_name(of_supp_name) else "🟢 Tier Maintained"
             elif "platform" in k:
