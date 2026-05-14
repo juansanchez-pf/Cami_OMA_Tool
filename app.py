@@ -106,7 +106,7 @@ def upload_csv_to_gdrive(df, filename):
     df.to_csv(csv_buffer, index=False)
     csv_buffer.seek(0)
     
-    media = MediaIoBaseUpload(csv_buffer, mimetype='text/csv', resumable=True)
+    media = MediaIoBaseUpload(csv_buffer, mimetype='text/csv', resumable=False)
     
     if items:
         file_id = items[0]['id']
