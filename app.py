@@ -5,16 +5,26 @@ import re
 import logging
 import os
 import io
+import json
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 from google_auth_oauthlib.flow import Flow
 from datetime import datetime
 
 # 1. Page Config always at the very top
-st.set_page_config(page_title="V4.0 Master Pre-Audit", layout="wide")
+st.set_page_config(page_title="V4.3 Master Pre-Audit", layout="wide")
 
 # --- 🚨 GOOGLE OAUTH & DRIVE CONFIGURATION 🚨 ---
-GDRIVE_DB_FOLDER_ID = "1GDLumdapathdoEHZwGfc8b3bkRHx3s57"
+# Tu única carpeta de base de datos donde se guardan los CSVs
+GDRIVE_DB_FOLDER_ID = "17ZjErNShxWjB55nZoONWLKlBp2doFFcU"
+
+# Las 3 Unidades Compartidas (Shared Drives) donde se buscarán los PDFs históricos
+GDRIVE_SEARCH_DRIVE_IDS = [
+    "1QXHOrIT0-KU8zC-hIus5qblUTRo5_7qh",
+    "1QXHOrIT0-KU8zC-hIus5qblUTRo5_7qh",
+    "1QXHOrIT0-KU8zC-hIus5qblUTRo5_7qh"
+]
+
 SCOPES = ['https://www.googleapis.com/auth/drive']
 REDIRECT_URI = "https://oma-tool-257372633450.us-central1.run.app"
 
@@ -23,19 +33,13 @@ logging.getLogger("pdfminer").setLevel(logging.ERROR)
 
 # 2. Funciones de Autenticación OAuth Web
 def get_flow():
-    import json
-    
-    # 1. Leer el secreto encriptado desde las variables de entorno de Cloud Run
     secret_string = os.environ.get('CLIENT_SECRET_JSON')
-    
     if not secret_string:
         st.error("❌ Error Crítico: No se encontró la variable CLIENT_SECRET_JSON en Google Cloud.")
         st.stop()
         
-    # 2. Convertir el texto JSON en un diccionario de Python
     client_config = json.loads(secret_string)
     
-    # 3. Usar from_client_config en lugar de from_client_secrets_file
     return Flow.from_client_config(
         client_config=client_config,
         scopes=SCOPES,
@@ -43,7 +47,6 @@ def get_flow():
     )
 
 def oauth_login_gate():
-    # A. Atrapar la respuesta de Google
     if 'code' in st.query_params:
         flow = get_flow()
         flow.fetch_token(code=st.query_params['code'])
@@ -51,39 +54,31 @@ def oauth_login_gate():
         st.query_params.clear()
         st.rerun()
 
-    # B. Mostrar la tarjeta de Login si no hay credenciales
     if 'creds' not in st.session_state:
         col1, col2, col3 = st.columns([2, 1.2, 2])
-        
         with col2: 
             for _ in range(8): st.write("") 
-            
             with st.container(border=True):
                 st.markdown("<h3 style='text-align: center;'>🔒 OMA Tool Login</h3>", unsafe_allow_html=True)
-                st.caption("<p style='text-align: center;'>v4.0 - Secure OAuth Edition</p>", unsafe_allow_html=True)
-                
-                # Generar el enlace de Google
+                st.caption("<p style='text-align: center;'>v4.3 - Optimized Search Edition</p>", unsafe_allow_html=True)
                 try:
                     flow = get_flow()
                     auth_url, _ = flow.authorization_url(prompt='consent')
-                    
-                    st.write("") # Espacio
+                    st.write("")
                     st.markdown(f'<div style="text-align: center;"><a href="{auth_url}" target="_self"><button style="background-color:#4285F4; color:white; padding:10px 20px; border:none; border-radius:5px; cursor:pointer; width:100%; font-weight:bold;">Log in con Google Drive</button></a></div>', unsafe_allow_html=True)
-                    st.write("") # Espacio
-                except FileNotFoundError:
-                    st.error("❌ Archivo 'client_secret.json' no encontrado en el repositorio.")
+                    st.write("")
+                except Exception as e:
+                    st.error(f"❌ Error al generar login: {e}")
         st.stop()
 
 # Ejecutar la puerta de seguridad
 oauth_login_gate()
 
-# --- Google Drive API Setup (Basado en el Usuario) ---
+# --- Google Drive API Setup ---
 def get_gdrive_service():
-    """Authenticates using the CURRENT USER'S OAuth credentials."""
     return build('drive', 'v3', credentials=st.session_state['creds'])
 
 def download_from_gdrive(file_id):
-    """Downloads a file from Google Drive directly into memory."""
     service = get_gdrive_service()
     request = service.files().get_media(fileId=file_id)
     file_stream = io.BytesIO()
@@ -95,11 +90,19 @@ def download_from_gdrive(file_id):
     return file_stream
 
 def upload_csv_to_gdrive(df, filename):
-    """Uploads or Overwrites a CSV in the Google Drive Database Folder."""
+    """Sube y sobrescribe los CSV en tu única carpeta de base de datos."""
     service = get_gdrive_service()
     
     query = f"'{GDRIVE_DB_FOLDER_ID}' in parents and name='{filename}' and trashed=false"
-    results = service.files().list(q=query, spaces='drive', fields="files(id, name)", supportsAllDrives=True, includeItemsFromAllDrives=True).execute()
+    results = service.files().list(
+        q=query, 
+        spaces='drive', 
+        corpora='allDrives', 
+        fields="files(id, name)", 
+        supportsAllDrives=True, 
+        includeItemsFromAllDrives=True
+    ).execute()
+    
     items = results.get('files', [])
     
     csv_buffer = io.BytesIO()
@@ -117,13 +120,21 @@ def upload_csv_to_gdrive(df, filename):
 
 @st.cache_data(show_spinner=False, ttl=60)
 def load_db_from_gdrive():
-    """Fetches the 3 Salesforce CSVs directly from Google Drive into Pandas."""
+    """Descarga los 3 CSVs desde la carpeta unificada."""
     service = get_gdrive_service()
-    query = f"'{GDRIVE_DB_FOLDER_ID}' in parents and trashed=false"
     db = {"opps": pd.DataFrame(), "subs": pd.DataFrame(), "accs": pd.DataFrame()}
     
+    query = f"'{GDRIVE_DB_FOLDER_ID}' in parents and trashed=false"
     try:
-        results = service.files().list(q=query, spaces='drive', fields="files(id, name)", supportsAllDrives=True, includeItemsFromAllDrives=True).execute()
+        results = service.files().list(
+            q=query, 
+            spaces='drive', 
+            corpora='allDrives', 
+            fields="files(id, name)", 
+            supportsAllDrives=True, 
+            includeItemsFromAllDrives=True
+        ).execute()
+        
         items = results.get('files', [])
         
         for item in items:
@@ -137,11 +148,12 @@ def load_db_from_gdrive():
                 db["accs"] = pd.read_csv(download_from_gdrive(file_id), dtype=str)
     except Exception as e:
         logging.error(f"Error loading DB from Drive: {e}")
+        
     return db
 
 @st.cache_data(show_spinner=False)
 def search_gdrive(account_name, prior_id=""):
-    """Global Search across all Shared Drives the user has access to."""
+    """Busca PDFs históricos iterando exclusivamente en los 3 Shared Drives definidos."""
     service = get_gdrive_service()
     found_files = []
     
@@ -150,26 +162,33 @@ def search_gdrive(account_name, prior_id=""):
     name_query = " and ".join(query_parts)
     
     query = f"mimeType='application/pdf' and ({name_query}) and trashed=false"
-    try:
-        results = service.files().list(
-            q=query, 
-            spaces='drive',
-            corpora='allDrives',
-            fields="files(id, name)", 
-            supportsAllDrives=True, 
-            includeItemsFromAllDrives=True
-        ).execute()
-        
-        items = results.get('files', [])
-        for item in items:
-            found_files.append({"name": item['name'], "id": item['id']})
-    except Exception as e:
-        logging.error(f"Drive API error: {e}")
-        
+    
+    # Iterar de manera segura y eficiente sobre los 3 discos
+    for drive_id in GDRIVE_SEARCH_DRIVE_IDS:
+        # Ignorar si no han puesto el ID real aún
+        if "AQUI" in drive_id: continue 
+            
+        try:
+            results = service.files().list(
+                q=query, 
+                spaces='drive',
+                corpora='drive',        # Restringimos la búsqueda a una unidad específica
+                driveId=drive_id,       # Inyectamos el ID del disco
+                fields="files(id, name)", 
+                supportsAllDrives=True, 
+                includeItemsFromAllDrives=True
+            ).execute()
+            
+            items = results.get('files', [])
+            for item in items:
+                found_files.append({"name": item['name'], "id": item['id']})
+        except Exception as e:
+            logging.warning(f"No se pudo buscar en el disco {drive_id}. Error: {e}")
+            
     return found_files
 
 def identify_and_save_files(uploaded_files):
-    """Standardizes and stores reports into the Google Drive Database."""
+    """Enruta y sobrescribe los CSV en la carpeta única de Google Drive."""
     for f in uploaded_files:
         try:
             try:
@@ -179,28 +198,22 @@ def identify_and_save_files(uploaded_files):
                 
             cols = [c.lower() for c in df.columns]
             
-            # The Filter Logic
             if 'renewed contract' in cols or 'commission date' in cols: 
                 upload_csv_to_gdrive(df, "rep_opportunities.csv")
-                st.success(f"✅ Success: Uploaded {f.name} as rep_opportunities.csv")
+                st.success(f"✅ Éxito: {f.name} guardado como rep_opportunities.csv")
                 
             elif 'sub qty' in cols or 'contract name' in cols: 
                 upload_csv_to_gdrive(df, "rep_subscriptions.csv")
-                st.success(f"✅ Success: Uploaded {f.name} as rep_subscriptions.csv")
+                st.success(f"✅ Éxito: {f.name} guardado como rep_subscriptions.csv")
                 
             elif 'account id 18 characters' in cols: 
                 upload_csv_to_gdrive(df, "rep_accounts.csv")
-                st.success(f"✅ Success: Uploaded {f.name} as rep_accounts.csv")
-                
+                st.success(f"✅ Éxito: {f.name} guardado como rep_accounts.csv")
             else:
-                # If the columns don't match, tell the user!
-                st.warning(f"⚠️ Skipped {f.name}: Could not recognize the column format. Are you sure this is the right report?")
+                st.warning(f"⚠️ Omitido {f.name}: Formato de columnas no reconocido.")
                 
         except Exception as e:
-            st.error(f"❌ Upload Error for {f.name}: {str(e)}")
-            return
-            
-    load_db_from_gdrive.clear()
+            st.error(f"❌ Error subiendo {f.name}: {str(e)}")
             
     load_db_from_gdrive.clear()
 
@@ -535,7 +548,7 @@ def run_v6_storytelling_engine(pdf_name, pdf_start_date, input_opp_id="", opp_ty
 
 # --- Streamlit UI ---
 
-st.title("🛡️ FinOps V4.0: The Storytelling Pre-Audit")
+st.title("🛡️ FinOps V4.3: The Storytelling Pre-Audit")
 
 if 'run_audit' not in st.session_state: st.session_state.run_audit = False
 if 'curr_data' not in st.session_state: st.session_state.curr_data = None
@@ -546,15 +559,16 @@ if 'manual_opp_id' not in st.session_state: st.session_state.manual_opp_id = ""
 with st.sidebar:
     st.header("🗄️ Cloud Database Manager")
     
-    st.success("✅ Securely Connected to Google Drive")
+    if os.environ.get('CLIENT_SECRET_JSON'):
+        st.success("✅ Securely Connected to Google Drive")
+    else:
+        st.error("❌ ERROR: El secreto CLIENT_SECRET_JSON no está llegando.")
         
     with st.expander("📂 Update Database"):
         files = st.file_uploader("Upload CSVs (Bulk)", type="csv", accept_multiple_files=True)
         if files and st.button("Sync to Google Drive"):
             with st.spinner("Uploading and updating database in Cloud..."):
                 identify_and_save_files(files)
-            st.success("Synced successfully!")
-            st.rerun()
     st.divider()
     opp_type = st.selectbox("Current Opportunity Type:", ["Renewal", "Add-On", "New Business"])
 
@@ -787,7 +801,7 @@ if st.session_state.run_audit and st.session_state.curr_data and st.session_stat
         
         col_t1, col_t2 = st.columns(2)
         col_t1.metric("Stated OF Total Fee", f"${total_fee:,.2f}")
-        col_t2.metric("Calculated Yearly Schedule Sum", f"${yearly_sum:,.2f}")
+        col_t2.metric("Calculated Sum of Line Items", f"${sum_lines:,.2f}")
         
         if total_fee > 0:
             if abs(yearly_sum - total_fee) > 1.0: 
@@ -888,7 +902,6 @@ if st.session_state.run_audit and st.session_state.curr_data and st.session_stat
             else:
                 status = "🟢 Maintained"
 
-            # Tier validation directly injected into status
             if "support" in k and of_supp:
                 status = "❌ Tier Changed" if normalize_name(sfdc_supp_name) != normalize_name(of_supp_name) else "🟢 Tier Maintained"
             elif "platform" in k and of_plat:
