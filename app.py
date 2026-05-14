@@ -172,16 +172,35 @@ def identify_and_save_files(uploaded_files):
     """Standardizes and stores reports into the Google Drive Database."""
     for f in uploaded_files:
         try:
-            f.seek(0); df = pd.read_csv(f, encoding='utf-8', dtype=str)
-        except:
-            f.seek(0); df = pd.read_csv(f, encoding='ISO-8859-1', dtype=str)
-        cols = [c.lower() for c in df.columns]
-        if 'renewed contract' in cols or 'commission date' in cols: 
-            upload_csv_to_gdrive(df, "rep_opportunities.csv")
-        elif 'sub qty' in cols or 'contract name' in cols: 
-            upload_csv_to_gdrive(df, "rep_subscriptions.csv")
-        elif 'account id 18 characters' in cols: 
-            upload_csv_to_gdrive(df, "rep_accounts.csv")
+            try:
+                f.seek(0); df = pd.read_csv(f, encoding='utf-8', dtype=str)
+            except:
+                f.seek(0); df = pd.read_csv(f, encoding='ISO-8859-1', dtype=str)
+                
+            cols = [c.lower() for c in df.columns]
+            
+            # The Filter Logic
+            if 'renewed contract' in cols or 'commission date' in cols: 
+                upload_csv_to_gdrive(df, "rep_opportunities.csv")
+                st.success(f"✅ Success: Uploaded {f.name} as rep_opportunities.csv")
+                
+            elif 'sub qty' in cols or 'contract name' in cols: 
+                upload_csv_to_gdrive(df, "rep_subscriptions.csv")
+                st.success(f"✅ Success: Uploaded {f.name} as rep_subscriptions.csv")
+                
+            elif 'account id 18 characters' in cols: 
+                upload_csv_to_gdrive(df, "rep_accounts.csv")
+                st.success(f"✅ Success: Uploaded {f.name} as rep_accounts.csv")
+                
+            else:
+                # If the columns don't match, tell the user!
+                st.warning(f"⚠️ Skipped {f.name}: Could not recognize the column format. Are you sure this is the right report?")
+                
+        except Exception as e:
+            st.error(f"❌ Upload Error for {f.name}: {str(e)}")
+            return
+            
+    load_db_from_gdrive.clear()
             
     load_db_from_gdrive.clear()
 
