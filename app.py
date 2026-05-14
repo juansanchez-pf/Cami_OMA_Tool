@@ -5,21 +5,43 @@ import re
 import logging
 import os
 import io
-import google.auth
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
+from google_auth_oauthlib.flow import Flow
 from datetime import datetime
 
 # 1. Page Config always at the very top
-st.set_page_config(page_title="V3.1 Master Pre-Audit", layout="wide")
+st.set_page_config(page_title="V4.0 Master Pre-Audit", layout="wide")
 
-# 2. Initialize login state
-if 'logged_in' not in st.session_state:
-    st.session_state['logged_in'] = False
+# --- 🚨 GOOGLE OAUTH & DRIVE CONFIGURATION 🚨 ---
+GDRIVE_DB_FOLDER_ID = "1GDLumdapathdoEHZwGfc8b3bkRHx3s57"
+CLIENT_SECRETS_FILE = "client_secret_json_OMA"
+SCOPES = ['https://www.googleapis.com/auth/drive']
+# ESTA URL DEBE SER EXACTAMENTE LA DE TU CLOUD RUN (SIN BARRA AL FINAL)
+REDIRECT_URI = "https://oma-tool-257372633450.us-central1.run.app"
 
-# 3. Define the Login Gate
-def login_gate():
-    if not st.session_state['logged_in']:
+# Configure Logging
+logging.getLogger("pdfminer").setLevel(logging.ERROR)
+
+# 2. Funciones de Autenticación OAuth Web
+def get_flow():
+    return Flow.from_client_secrets_file(
+        CLIENT_SECRETS_FILE,
+        scopes=SCOPES,
+        redirect_uri=REDIRECT_URI
+    )
+
+def oauth_login_gate():
+    # A. Atrapar la respuesta de Google
+    if 'code' in st.query_params:
+        flow = get_flow()
+        flow.fetch_token(code=st.query_params['code'])
+        st.session_state['creds'] = flow.credentials
+        st.query_params.clear()
+        st.rerun()
+
+    # B. Mostrar la tarjeta de Login si no hay credenciales
+    if 'creds' not in st.session_state:
         col1, col2, col3 = st.columns([2, 1.2, 2])
         
         with col2: 
@@ -27,33 +49,27 @@ def login_gate():
             
             with st.container(border=True):
                 st.markdown("<h3 style='text-align: center;'>🔒 OMA Tool Login</h3>", unsafe_allow_html=True)
-                st.caption("<p style='text-align: center;'>v3.1 - Cloud Edition</p>", unsafe_allow_html=True)
+                st.caption("<p style='text-align: center;'>v4.0 - Secure OAuth Edition</p>", unsafe_allow_html=True)
                 
-                password = st.text_input("Password", type="password", label_visibility="collapsed", placeholder="Enter Password")
-                
-                if st.button("Login", use_container_width=True):
-                    if password == "Coupa2026!":
-                        st.session_state['logged_in'] = True
-                        st.rerun()
-                    else:
-                        st.error("❌ Incorrect")
+                # Generar el enlace de Google
+                try:
+                    flow = get_flow()
+                    auth_url, _ = flow.authorization_url(prompt='consent')
+                    
+                    st.write("") # Espacio
+                    st.markdown(f'<div style="text-align: center;"><a href="{auth_url}" target="_self"><button style="background-color:#4285F4; color:white; padding:10px 20px; border:none; border-radius:5px; cursor:pointer; width:100%; font-weight:bold;">Log in con Google Drive</button></a></div>', unsafe_allow_html=True)
+                    st.write("") # Espacio
+                except FileNotFoundError:
+                    st.error("❌ Archivo 'client_secret.json' no encontrado en el repositorio.")
         st.stop()
 
-# Run the gate
-login_gate()
+# Ejecutar la puerta de seguridad
+oauth_login_gate()
 
-# --- Configure Logging ---
-logging.getLogger("pdfminer").setLevel(logging.ERROR)
-
-# --- 🚨 GOOGLE DRIVE CONFIGURATION 🚨 ---
-GDRIVE_DB_FOLDER_ID = "1GDLumdapathdoEHZwGfc8b3bkRHx3s57"
-
-# --- Google Drive API Setup ---
-@st.cache_resource
+# --- Google Drive API Setup (Basado en el Usuario) ---
 def get_gdrive_service():
-    """Authenticates with Google Cloud automatically using the Cloud Run Service Account."""
-    credentials, project = google.auth.default(scopes=['https://www.googleapis.com/auth/drive'])
-    return build('drive', 'v3', credentials=credentials)
+    """Authenticates using the CURRENT USER'S OAuth credentials."""
+    return build('drive', 'v3', credentials=st.session_state['creds'])
 
 def download_from_gdrive(file_id):
     """Downloads a file from Google Drive directly into memory."""
@@ -114,7 +130,7 @@ def load_db_from_gdrive():
 
 @st.cache_data(show_spinner=False)
 def search_gdrive(account_name, prior_id=""):
-    """Global Search across all Shared Drives the Service Account has access to."""
+    """Global Search across all Shared Drives the user has access to."""
     service = get_gdrive_service()
     found_files = []
     
@@ -489,7 +505,7 @@ def run_v6_storytelling_engine(pdf_name, pdf_start_date, input_opp_id="", opp_ty
 
 # --- Streamlit UI ---
 
-st.title("🛡️ FinOps V3.1: The Storytelling Pre-Audit")
+st.title("🛡️ FinOps V4.0: The Storytelling Pre-Audit")
 
 if 'run_audit' not in st.session_state: st.session_state.run_audit = False
 if 'curr_data' not in st.session_state: st.session_state.curr_data = None
@@ -500,7 +516,7 @@ if 'manual_opp_id' not in st.session_state: st.session_state.manual_opp_id = ""
 with st.sidebar:
     st.header("🗄️ Cloud Database Manager")
     
-    st.success("✅ Connected to Google Drive DB")
+    st.success("✅ Securely Connected to Google Drive")
         
     with st.expander("📂 Update Database"):
         files = st.file_uploader("Upload CSVs (Bulk)", type="csv", accept_multiple_files=True)
