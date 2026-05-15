@@ -48,35 +48,42 @@ def get_flow():
     )
 
 def oauth_login_gate():
-    # 1. Si regresamos de Google con un código en la URL
+    # 1. Si regresamos de Google con el código
     if 'code' in st.query_params:
         code = st.query_params['code']
         try:
             flow = get_flow()
             
-            # 🚨 RECUPERAMOS EL SECRETO DE LA MEMORIA DE SESIÓN
+            # RECUPERAR EL SECRETO DE LA SESIÓN
             if 'code_verifier' in st.session_state:
+                # Forzamos al objeto flow a usar el secreto guardado
                 flow.code_verifier = st.session_state['code_verifier']
-            
-            # Intercambiamos el código por el Token real
-            flow.fetch_token(code=code)
-            st.session_state['creds'] = flow.credentials
-            
-            # Limpiamos la URL y la memoria temporal
-            st.query_params.clear()
-            if 'code_verifier' in st.session_state:
+                
+                # Intentamos el intercambio
+                flow.fetch_token(code=code)
+                st.session_state['creds'] = flow.credentials
+                
+                # Limpiamos todo para entrar a la app
+                st.query_params.clear()
                 del st.session_state['code_verifier']
-            st.rerun()
-            
+                st.rerun()
+            else:
+                # Si llegamos aquí sin verifier, es que la sesión se perdió
+                st.error("❌ La sesión de seguridad expiró o se abrió en una pestaña diferente.")
+                if st.button("Reintentar Login"):
+                    st.query_params.clear()
+                    st.rerun()
+        
         except Exception as e:
-            st.error(f"❌ Error al validar el acceso: {e}")
-            if st.button("🔄 Reintentar Login desde cero"):
+            st.error(f"❌ Error crítico de validación: {e}")
+            st.info("Tip: Asegúrate de no cerrar la pestaña mientras carga Google.")
+            if st.button("🔄 Reiniciar flujo de acceso"):
                 st.query_params.clear()
                 st.session_state.clear()
                 st.rerun()
-            st.stop()
+        st.stop()
 
-    # 2. Si no estamos logueados, mostramos el botón
+    # 2. Si no hay credenciales, mostramos el botón
     if 'creds' not in st.session_state:
         col1, col2, col3 = st.columns([1, 2, 1])
         with col2:
@@ -85,10 +92,10 @@ def oauth_login_gate():
                 st.markdown("<h3 style='text-align: center;'>🔒 OMA Tool Login</h3>", unsafe_allow_html=True)
                 try:
                     flow = get_flow()
-                    # Generamos la URL de Google
+                    # IMPORTANTE: authorization_url genera el code_verifier automáticamente
                     auth_url, _ = flow.authorization_url(prompt='consent', access_type='offline')
                     
-                    # 🚨 GUARDAMOS EL SECRETO EN LA MEMORIA ANTES DE IRNOS A GOOGLE
+                    # GUARDAR EL SECRETO EN LA SESIÓN ANTES DE IRNOS
                     st.session_state['code_verifier'] = flow.code_verifier
                     
                     st.markdown(
@@ -99,7 +106,7 @@ def oauth_login_gate():
                         unsafe_allow_html=True
                     )
                 except Exception as e:
-                    st.error(f"❌ Error al generar URL de login: {e}")
+                    st.error(f"❌ Error al conectar con Google: {e}")
         st.stop()
 
 # Ejecutar la puerta de seguridad
