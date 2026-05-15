@@ -201,38 +201,42 @@ def load_db_from_gdrive():
 
 @st.cache_data(show_spinner=False)
 def search_gdrive(account_name, prior_id=""):
-    """Busca PDFs históricos iterando exclusivamente en los 3 Shared Drives definidos."""
+    """
+    Versión Cloud: Busca PDFs en las Unidades Compartidas usando la API.
+    """
     service = get_gdrive_service()
     found_files = []
     
-    core_words = [str(prior_id).strip()] if prior_id else [w for w in re.split(r'[^a-zA-Z0-9]', account_name) if w.strip() and w.lower() not in ['llc', 'inc', 'corp', 'ltd', 'co']][:2]
-    query_parts = [f"name contains '{word}'" for word in core_words]
-    name_query = " and ".join(query_parts)
+    # Limpiamos el nombre para la búsqueda (tomamos las primeras 2 palabras)
+    clean_name = [w for w in re.split(r'[^a-zA-Z0-9]', account_name) if w.strip() and w.lower() not in ['llc', 'inc', 'corp', 'ltd', 'co']][:2]
+    search_query = " and ".join([f"name contains '{w}'" for w in clean_name])
     
-    query = f"mimeType='application/pdf' and ({name_query}) and trashed=false"
+    # Si tenemos el ID de la oportunidad previa, lo incluimos en la búsqueda
+    if prior_id:
+        search_query = f"({search_query} or name contains '{prior_id}')"
     
-    # Iterar de manera segura y eficiente sobre los 3 discos
-    for drive_id in GDRIVE_SEARCH_DRIVE_IDS:
-        # Ignorar si no han puesto el ID real aún
-        if "AQUI" in drive_id: continue 
-            
-        try:
+    # Filtramos para que solo busque PDFs
+    final_query = f"{search_query} and mimeType = 'application/pdf' and trashed = false"
+
+    try:
+        # Buscamos en cada ID de unidad compartida que configuramos
+        for drive_id in GDRIVE_SEARCH_DRIVE_IDS:
             results = service.files().list(
-                q=query, 
+                q=final_query,
                 spaces='drive',
-                corpora='drive',        # Restringimos la búsqueda a una unidad específica
-                driveId=drive_id,       # Inyectamos el ID del disco
-                fields="files(id, name)", 
-                supportsAllDrives=True, 
-                includeItemsFromAllDrives=True
+                corpora='drive',
+                driveId=drive_id,
+                includeItemsFromAllDrives=True,
+                supportsAllDrives=True,
+                fields="files(id, name)"
             ).execute()
             
-            items = results.get('files', [])
-            for item in items:
-                found_files.append({"name": item['name'], "id": item['id']})
-        except Exception as e:
-            logging.warning(f"No se pudo buscar en el disco {drive_id}. Error: {e}")
-            
+            for file in results.get('files', []):
+                # Guardamos el nombre y el ID para poder descargarlo después
+                found_files.append({"name": file['name'], "id": file['id']})
+    except Exception as e:
+        st.error(f"Error buscando en Drive: {e}")
+        
     return found_files
 
 def identify_and_save_files(uploaded_files):
