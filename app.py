@@ -201,39 +201,34 @@ def load_db_from_gdrive():
 
 @st.cache_data(show_spinner=False)
 def search_gdrive(account_name, prior_id=""):
-    """
-    Versión Cloud: Busca PDFs en las Unidades Compartidas usando la API.
-    """
     service = get_gdrive_service()
     found_files = []
     
-    # Limpiamos el nombre para la búsqueda (tomamos las primeras 2 palabras)
-    clean_name = [w for w in re.split(r'[^a-zA-Z0-9]', account_name) if w.strip() and w.lower() not in ['llc', 'inc', 'corp', 'ltd', 'co']][:2]
-    search_query = " and ".join([f"name contains '{w}'" for w in clean_name])
+    # 1. Limpiamos el nombre para la búsqueda
+    clean_words = [w for w in re.split(r'[^a-zA-Z0-9]', account_name) if w.strip() and w.lower() not in ['llc', 'inc', 'corp', 'ltd', 'co']][:2]
+    name_query = " and ".join([f"name contains '{w}'" for w in clean_words])
     
-    # Si tenemos el ID de la oportunidad previa, lo incluimos en la búsqueda
     if prior_id:
-        search_query = f"({search_query} or name contains '{prior_id}')"
-    
-    # Filtramos para que solo busque PDFs
-    final_query = f"{search_query} and mimeType = 'application/pdf' and trashed = false"
+        name_query = f"({name_query} or name contains '{prior_id}')"
 
     try:
-        # Buscamos en cada ID de unidad compartida que configuramos
-        for drive_id in GDRIVE_SEARCH_DRIVE_IDS:
+        # 2. Iteramos sobre tus IDs de carpetas
+        for folder_id in GDRIVE_SEARCH_DRIVE_IDS:
+            # CAMBIO CLAVE: Usamos '{folder_id} in parents' en lugar de driveId
+            # Esto busca directamente dentro de la carpeta que definiste
+            final_query = f"'{folder_id}' in parents and {name_query} and mimeType = 'application/pdf' and trashed = false"
+            
             results = service.files().list(
                 q=final_query,
                 spaces='drive',
-                corpora='drive',
-                driveId=drive_id,
                 includeItemsFromAllDrives=True,
                 supportsAllDrives=True,
                 fields="files(id, name)"
             ).execute()
             
             for file in results.get('files', []):
-                # Guardamos el nombre y el ID para poder descargarlo después
                 found_files.append({"name": file['name'], "id": file['id']})
+                
     except Exception as e:
         st.error(f"Error buscando en Drive: {e}")
         
