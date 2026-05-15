@@ -35,7 +35,7 @@ logging.getLogger("pdfminer").setLevel(logging.ERROR)
 def get_flow():
     secret_string = os.environ.get('CLIENT_SECRET_JSON')
     if not secret_string:
-        st.error("❌ Error Crítico: No se encontró la variable CLIENT_SECRET_JSON en Google Cloud.")
+        st.error("❌ Error Crítico: No se encontró la variable CLIENT_SECRET_JSON.")
         st.stop()
         
     client_config = json.loads(secret_string)
@@ -47,28 +47,36 @@ def get_flow():
     )
 
 def oauth_login_gate():
+    # 1. Si Google nos devuelve un código, intentamos canjearlo por un token
     if 'code' in st.query_params:
-        flow = get_flow()
-        flow.fetch_token(code=st.query_params['code'])
-        st.session_state['creds'] = flow.credentials
-        st.query_params.clear()
-        st.rerun()
+        try:
+            flow = get_flow()
+            # La magia está aquí: añadimos el verifier vacío para saltar el error
+            flow.fetch_token(code=st.query_params['code'], code_verifier=None)
+            st.session_state['creds'] = flow.credentials
+            st.query_params.clear()
+            st.rerun()
+        except Exception as e:
+            st.error(f"❌ Error al validar el acceso: {e}")
+            if st.button("Reintentar Login"):
+                st.query_params.clear()
+                st.rerun()
+            st.stop()
 
+    # 2. Si no hay credenciales en la sesión, mostramos el botón de login
     if 'creds' not in st.session_state:
-        col1, col2, col3 = st.columns([2, 1.2, 2])
-        with col2: 
-            for _ in range(8): st.write("") 
+        col1, col2, col3 = st.columns([1, 2, 1])
+        with col2:
+            st.write("")
             with st.container(border=True):
                 st.markdown("<h3 style='text-align: center;'>🔒 OMA Tool Login</h3>", unsafe_allow_html=True)
-                st.caption("<p style='text-align: center;'>v4.3 - Optimized Search Edition</p>", unsafe_allow_html=True)
                 try:
                     flow = get_flow()
-                    auth_url, _ = flow.authorization_url(prompt='consent')
-                    st.write("")
+                    # Quitamos PKCE forzando un estado simple
+                    auth_url, _ = flow.authorization_url(prompt='consent', access_type='offline')
                     st.markdown(f'<div style="text-align: center;"><a href="{auth_url}" target="_self"><button style="background-color:#4285F4; color:white; padding:10px 20px; border:none; border-radius:5px; cursor:pointer; width:100%; font-weight:bold;">Log in con Google Drive</button></a></div>', unsafe_allow_html=True)
-                    st.write("")
                 except Exception as e:
-                    st.error(f"❌ Error al generar login: {e}")
+                    st.error(f"❌ Error al generar URL de login: {e}")
         st.stop()
 
 # Ejecutar la puerta de seguridad
