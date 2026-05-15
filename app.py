@@ -40,6 +40,7 @@ def get_flow():
         
     client_config = json.loads(secret_string)
     
+    # Creamos el Flow
     return Flow.from_client_config(
         client_config=client_config,
         scopes=SCOPES,
@@ -47,23 +48,26 @@ def get_flow():
     )
 
 def oauth_login_gate():
-    # 1. Si Google nos devuelve un código, intentamos canjearlo por un token
+    # 1. Capturar el código de la URL
     if 'code' in st.query_params:
+        code = st.query_params['code']
         try:
             flow = get_flow()
-            # La magia está aquí: añadimos el verifier vacío para saltar el error
-            flow.fetch_token(code=st.query_params['code'], code_verifier=None)
+            # 🚨 LA SOLUCIÓN: Usamos code_verifier=None para saltar el chequeo de PKCE
+            flow.fetch_token(code=code, code_verifier=None)
             st.session_state['creds'] = flow.credentials
+            
+            # Limpiar la URL para que no intente validar el mismo código otra vez
             st.query_params.clear()
             st.rerun()
         except Exception as e:
             st.error(f"❌ Error al validar el acceso: {e}")
-            if st.button("Reintentar Login"):
+            if st.button("🔄 Reintentar Login"):
                 st.query_params.clear()
                 st.rerun()
             st.stop()
 
-    # 2. Si no hay credenciales en la sesión, mostramos el botón de login
+    # 2. Si no hay credenciales, mostrar el botón
     if 'creds' not in st.session_state:
         col1, col2, col3 = st.columns([1, 2, 1])
         with col2:
@@ -72,9 +76,19 @@ def oauth_login_gate():
                 st.markdown("<h3 style='text-align: center;'>🔒 OMA Tool Login</h3>", unsafe_allow_html=True)
                 try:
                     flow = get_flow()
-                    # Quitamos PKCE forzando un estado simple
-                    auth_url, _ = flow.authorization_url(prompt='consent', access_type='offline')
-                    st.markdown(f'<div style="text-align: center;"><a href="{auth_url}" target="_self"><button style="background-color:#4285F4; color:white; padding:10px 20px; border:none; border-radius:5px; cursor:pointer; width:100%; font-weight:bold;">Log in con Google Drive</button></a></div>', unsafe_allow_html=True)
+                    # 🚨 LA SOLUCIÓN 2: Generar URL sin PKCE (authorization_url simple)
+                    auth_url, _ = flow.authorization_url(
+                        prompt='consent', 
+                        access_type='offline',
+                        include_granted_scopes='true'
+                    )
+                    st.markdown(
+                        f'<div style="text-align: center;">'
+                        f'<a href="{auth_url}" target="_self">'
+                        f'<button style="background-color:#4285F4; color:white; padding:10px 20px; border:none; border-radius:5px; cursor:pointer; width:100%; font-weight:bold;">'
+                        f'Log in con Google Drive</button></a></div>', 
+                        unsafe_allow_html=True
+                    )
                 except Exception as e:
                     st.error(f"❌ Error al generar URL de login: {e}")
         st.stop()
