@@ -9,51 +9,77 @@ import json
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 from google_auth_oauthlib.flow import Flow
+from google.oauth2.credentials import Credentials
 from datetime import datetime
+from urllib.parse import urlencode
 
 # 1. Page Config always at the very top
 st.set_page_config(page_title="V4.3 Master Pre-Audit", layout="wide")
 
 # --- 🚨 GOOGLE OAUTH & DRIVE CONFIGURATION 🚨 ---
-# Tu única carpeta de base de datos donde se guardan los CSVs
 GDRIVE_DB_FOLDER_ID = "17ZjErNShxWjB55nZoONWLKlBp2doFFcU"
-
-# Las 3 Unidades Compartidas (Shared Drives) donde se buscarán los PDFs históricos
 GDRIVE_SEARCH_DRIVE_IDS = [
     "1QXHOrIT0-KU8zC-hIus5qblUTRo5_7qh",
     "1QXHOrIT0-KU8zC-hIus5qblUTRo5_7qh",
     "1QXHOrIT0-KU8zC-hIus5qblUTRo5_7qh"
 ]
-
 SCOPES = ['https://www.googleapis.com/auth/drive']
 REDIRECT_URI = "https://cami-oma-tool-257372633450.us-central1.run.app"
 
 # Configure Logging
 logging.getLogger("pdfminer").setLevel(logging.ERROR)
 
+
 # 2. Funciones de Autenticación OAuth Web
-def get_flow():
+def get_client_config():
     secret_string = os.environ.get('CLIENT_SECRET_JSON')
     if not secret_string:
         st.error("❌ No se encontró CLIENT_SECRET_JSON.")
         st.stop()
-    
-    client_config = json.loads(secret_string)
-    return Flow.from_client_config(
+    return json.loads(secret_string)
+
+
+def get_flow():
+    client_config = get_client_config()
+    flow = Flow.from_client_config(
         client_config,
         scopes=SCOPES,
         redirect_uri=REDIRECT_URI
     )
+    # Deshabilitar PKCE ANTES de cualquier operación
+    flow.oauth2session.code_challenge_method = None
+    return flow
+
+
+def get_auth_url():
+    """
+    Construye la URL de autorización manualmente, garantizando
+    que NO se incluya code_challenge ni code_challenge_method.
+    """
+    client_config = get_client_config()
+    client_id = client_config['web']['client_id']
+
+    params = {
+        "client_id": client_id,
+        "redirect_uri": REDIRECT_URI,
+        "response_type": "code",
+        "scope": " ".join(SCOPES),
+        "access_type": "offline",
+        "prompt": "consent",
+        # ✅ Sin code_challenge ni code_challenge_method
+    }
+    return "https://accounts.google.com/o/oauth2/auth?" + urlencode(params)
+
 
 def oauth_login_gate():
-    # 1. Manejar el regreso de Google
+    # PASO A: Manejar el regreso de Google con el código
     if 'code' in st.query_params:
         try:
             flow = get_flow()
-            # 🚨 FORZAMOS A GOOGLE A NO PEDIR EL VERIFIER
-            # Al pasar code_verifier=None aquí, le decimos que no lo use
-            flow.fetch_token(code=st.query_params['code'], code_verifier=None)
-            
+            flow.fetch_token(
+                code=st.query_params['code'],
+                code_verifier=None  # Explícito: sin verifier
+            )
             st.session_state['creds'] = flow.credentials
             st.query_params.clear()
             st.rerun()
@@ -61,44 +87,40 @@ def oauth_login_gate():
             st.error(f"❌ Error al validar acceso: {e}")
             if st.button("🔄 Reintentar"):
                 st.query_params.clear()
+                st.session_state.clear()
                 st.rerun()
             st.stop()
 
-    # 2. Mostrar botón de Login
+    # PASO B: Mostrar botón de Login si no hay credenciales
     if 'creds' not in st.session_state:
         col1, col2, col3 = st.columns([1, 2, 1])
         with col2:
             st.write("")
             with st.container(border=True):
-                st.markdown("<h3 style='text-align: center;'>🔒 OMA Tool Login</h3>", unsafe_allow_html=True)
+                st.markdown(
+                    "<h3 style='text-align: center;'>🔒 OMA Tool Login</h3>",
+                    unsafe_allow_html=True
+                )
                 try:
-                    flow = get_flow()
-                    
-                    # 🎯 LA CLAVE DE CLAUDE: Generamos la URL y nos aseguramos 
-                    # de que NO lleve parámetros de PKCE (code_challenge)
-                    auth_url, _ = flow.authorization_url(
-                        prompt='consent',
-                        access_type='offline'
-                        # Nota: No agregamos nada de PKCE aquí
-                    )
-                    
-                    # Hack de seguridad extra: Si la librería intentó poner PKCE, 
-                    # lo forzamos a None en la sesión antes de que el usuario haga clic
-                    flow.oauth2session.code_challenge_method = None
-                    
+                    # ✅ URL construida manualmente, sin PKCE garantizado
+                    auth_url = get_auth_url()
                     st.markdown(
                         f'<div style="text-align: center;">'
                         f'<a href="{auth_url}" target="_self">'
-                        f'<button style="background-color:#4285F4; color:white; padding:10px 20px; border:none; border-radius:5px; cursor:pointer; width:100%; font-weight:bold;">'
-                        f'Log in con Google Drive</button></a></div>', 
+                        f'<button style="background-color:#4285F4; color:white; '
+                        f'padding:10px 20px; border:none; border-radius:5px; '
+                        f'cursor:pointer; width:100%; font-weight:bold;">'
+                        f'Log in con Google Drive</button></a></div>',
                         unsafe_allow_html=True
                     )
                 except Exception as e:
                     st.error(f"❌ Error al generar URL: {e}")
         st.stop()
 
+
 # Ejecutar la puerta de seguridad
 oauth_login_gate()
+
 
 # --- Google Drive API Setup ---
 def get_gdrive_service():
