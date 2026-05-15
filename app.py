@@ -26,7 +26,7 @@ GDRIVE_SEARCH_DRIVE_IDS = [
 ]
 
 SCOPES = ['https://www.googleapis.com/auth/drive']
-REDIRECT_URI = "https://oma-tool-257372633450.us-central1.run.app"
+REDIRECT_URI = "https://cami-oma-tool-257372633450.us-central1.run.app"
 
 # Configure Logging
 logging.getLogger("pdfminer").setLevel(logging.ERROR)
